@@ -1,0 +1,4 @@
+# Keep LF in the repo regardless of the checkout platform. Without this,
+# Windows checkouts rewrite every file and git reports phantom changes.
+* text=auto eol=lf
+*.png binary

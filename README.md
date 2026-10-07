@@ -206,7 +206,7 @@ click *Load unpacked*, and select the `extension/` folder.
 ### Useful commands
 
 ```bash
-npm test                                      # 99 tests, no framework
+npm test                                      # 115 tests, no framework
 node scripts/verify-image.js photo.jpg        # judge any photo from the CLI
 node scripts/verify-image.js --list-tasks     # see the task pool
 BT_MODEL=llava:13b npm run server             # swap the model
