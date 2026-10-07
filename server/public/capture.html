@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f0c">
+<title>Go Outside</title>
+<style>
+  :root {
+    --bg:#0b0f0c; --surface:#131a15; --line:#24312a;
+    --ink:#e9f1ea; --muted:#92a69a;
+    --grass:#5fd38a; --grass-ink:#06281a;
+    --warn:#f0b254; --bad:#f07a6a;
+    --r:14px;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; }
+  body {
+    background:var(--bg); color:var(--ink);
+    font:16px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    display:flex; flex-direction:column;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header { padding:18px 20px 12px; }
+  .eyebrow { font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); }
+  h1 { margin:6px 0 0; font-size:21px; font-weight:650; letter-spacing:-.01em; }
+  main { flex:1; display:flex; flex-direction:column; gap:14px; padding:0 20px 20px; min-height:0; }
+
+  .task {
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--r);
+    padding:14px 16px;
+  }
+  .task b { color:var(--grass); font-weight:600; }
+
+  .stage { position:relative; flex:1; min-height:0; border-radius:var(--r); overflow:hidden; background:#000; border:1px solid var(--line); }
+  video, canvas.shot { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:block; }
+  canvas.shot { display:none; }
+  body.has-shot video { display:none; }
+  body.has-shot canvas.shot { display:block; }
+
+  .veil {
+    position:absolute; inset:0; display:none; place-items:center; text-align:center;
+    background:rgba(8,12,9,.84); backdrop-filter:blur(3px); padding:24px; z-index:3;
+  }
+  body.busy .veil, body.done .veil { display:grid; }
+  .spinner { width:34px; height:34px; margin:0 auto 14px; border:3px solid rgba(255,255,255,.18); border-top-color:var(--grass); border-radius:50%; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  body.done .spinner { display:none; }
+  .veil h2 { margin:0 0 6px; font-size:18px; }
+  .veil p { margin:0; color:var(--muted); font-size:14px; max-width:30ch; }
+  .checks { margin-top:14px; display:grid; gap:7px; font-size:13px; text-align:left; }
+  .checks div { color:var(--muted); display:flex; gap:9px; align-items:center; }
+  .checks div.on { color:var(--ink); }
+  .checks div.pass { color:var(--grass); }
+  .dot { width:7px; height:7px; border-radius:50%; background:currentColor; flex:none; opacity:.5; }
+  .checks div.on .dot, .checks div.pass .dot { opacity:1; }
+
+  .msg { border-radius:var(--r); padding:12px 14px; font-size:14px; display:none; }
+  .msg.show { display:block; }
+  .msg.bad  { background:rgba(240,122,106,.12); border:1px solid rgba(240,122,106,.34); color:#ffd9d2; }
+  .msg.good { background:rgba(95,211,138,.12); border:1px solid rgba(95,211,138,.34); color:#ccf5dc; }
+
+  .actions { display:grid; gap:10px; }
+  button {
+    font:inherit; font-weight:600; border:0; border-radius:12px; padding:15px;
+    background:var(--grass); color:var(--grass-ink); cursor:pointer;
+  }
+  button:active { transform:translateY(1px); }
+  button[disabled] { opacity:.45; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--ink); }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  footer { padding:0 20px 18px; color:var(--muted); font-size:12px; text-align:center; }
+  .err { color:var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">BreakTension</div>
+  <h1 id="title">Prove you went outside</h1>
+</header>
+
+<main>
+  <div class="task">Task: <b id="task">loading…</b></div>
+
+  <div class="stage">
+    <video id="v" playsinline autoplay muted></video>
+    <canvas id="shot" class="shot"></canvas>
+    <div class="veil">
+      <div>
+        <div class="spinner"></div>
+        <h2 id="veilTitle">Checking your photo…</h2>
+        <p id="veilText">Gemma is looking at this on your laptop. Nothing is uploaded anywhere.</p>
+        <div class="checks" id="checks">
+          <div data-k="outdoor"><span class="dot"></span>Outdoors in open air</div>
+          <div data-k="glass"><span class="dot"></span>Not through a window</div>
+          <div data-k="screen"><span class="dot"></span>A real scene</div>
+          <div data-k="task"><span class="dot"></span>Task completed</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="msg" id="msg"></div>
+
+  <div class="actions">
+    <button id="snap">Take photo</button>
+    <div class="row" id="retryRow" style="display:none">
+      <button class="ghost" id="again">Retake</button>
+      <button id="send">Use this photo</button>
+    </div>
+  </div>
+</main>
+
+<footer>Runs on your laptop with Gemma. No account, no upload, no internet.</footer>
+
+<script>
+const qs = new URLSearchParams(location.search);
+const token = qs.get('t');
+
+const v = document.getElementById('v');
+const shot = document.getElementById('shot');
+const msg = document.getElementById('msg');
+const snap = document.getElementById('snap');
+const again = document.getElementById('again');
+const send = document.getElementById('send');
+const retryRow = document.getElementById('retryRow');
+const checks = document.getElementById('checks');
+
+let stream = null;
+let frame = null;
+
+function say(text, kind) {
+  msg.textContent = text;
+  msg.className = 'msg show ' + (kind || '');
+}
+function clearSay() { msg.className = 'msg'; }
+
+async function loadTask() {
+  try {
+    const r = await fetch(`/task?t=${encodeURIComponent(token)}`);
+    if (!r.ok) throw new Error('expired');
+    const d = await r.json();
+    document.getElementById('task').textContent = d.task ? d.task.text : '—';
+    if (d.attempts > 0) say(`Attempt ${d.attempts + 1}. Read the task carefully.`, '');
+  } catch {
+    document.getElementById('task').textContent = 'link expired';
+    say('This link expired. Scan the QR code on your laptop again.', 'bad');
+    snap.disabled = true;
+  }
+}
+
+async function startCamera() {
+  // Live stream only. There is deliberately no file input anywhere on this
+  // page, so a photo from the gallery is not just discouraged but impossible.
+  if (!navigator.mediaDevices?.getUserMedia) {
+    say('This browser cannot open the camera. Needs HTTPS and a modern browser.', 'bad');
+    snap.disabled = true;
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 960 } },
+      audio: false,
+    });
+    v.srcObject = stream;
+  } catch (err) {
+    const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
+    say(
+      denied
+        ? 'Camera permission was refused. Allow it and reload — a live photo is the whole point.'
+        : `Could not start the camera (${err && err.name ? err.name : 'unknown'}). On a phone this page must be opened over HTTPS.`,
+      'bad'
+    );
+    snap.disabled = true;
+  }
+}
+
+snap.onclick = () => {
+  if (!stream) return;
+  const track = stream.getVideoTracks()[0];
+  const s = track.getSettings();
+  const w = s.width || v.videoWidth || 1280;
+  const h = s.height || v.videoHeight || 960;
+
+  // Downscale: the long edge at 1024 is plenty for the model and keeps the
+  // request small over Wi-Fi.
+  const max = 1024;
+  const scale = Math.min(1, max / Math.max(w, h));
+  shot.width = Math.round(w * scale);
+  shot.height = Math.round(h * scale);
+  shot.getContext('2d').drawImage(v, 0, 0, shot.width, shot.height);
+
+  frame = shot.toDataURL('image/jpeg', 0.82);
+  document.body.classList.add('has-shot');
+  snap.style.display = 'none';
+  retryRow.style.display = 'grid';
+  clearSay();
+};
+
+again.onclick = () => {
+  frame = null;
+  document.body.classList.remove('has-shot');
+  retryRow.style.display = 'none';
+  snap.style.display = 'block';
+  clearSay();
+};
+
+const ORDER = ['outdoor', 'glass', 'screen', 'task'];
+function markStage(stage) {
+  const i = ORDER.indexOf(stage);
+  [...checks.children].forEach((el, idx) => {
+    el.classList.toggle('pass', idx < i);
+    el.classList.toggle('on', idx === i);
+  });
+}
+
+send.onclick = async () => {
+  if (!frame) return;
+  document.body.classList.add('busy');
+  document.getElementById('veilTitle').textContent = 'Checking your photo…';
+  markStage('outdoor');
+
+  // The server pushes which check is running; nice to watch while standing outside.
+  let es = null;
+  try {
+    es = new EventSource('/events');
+    es.addEventListener('stage', (e) => { try { markStage(JSON.parse(e.data).stage); } catch {} });
+  } catch {}
+
+  try {
+    const r = await fetch('/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, image: frame }),
+    });
+    const d = await r.json();
+    es && es.close();
+
+    if (d.ok) {
+      document.body.classList.remove('busy');
+      document.body.classList.add('done');
+      [...checks.children].forEach((el) => el.classList.add('pass'));
+      document.getElementById('veilTitle').textContent = 'Verified — go back in';
+      const mins = d.durationMs ? Math.max(1, Math.round(d.durationMs / 60000)) : null;
+      document.getElementById('veilText').textContent = mins
+        ? `You were away for about ${mins} minute${mins === 1 ? '' : 's'}. Your browser is unlocked.`
+        : 'Your browser is unlocked.';
+      document.getElementById('title').textContent = 'Nice one';
+      retryRow.style.display = 'none';
+      return;
+    }
+
+    document.body.classList.remove('busy');
+    say(d.reason || 'That did not pass. Try again.', 'bad');
+    again.click();
+  } catch (err) {
+    es && es.close();
+    document.body.classList.remove('busy');
+    say('Lost contact with your laptop. Check you are on the same Wi-Fi.', 'bad');
+  }
+};
+
+loadTask();
+startCamera();
+</script>
+</body>
+</html>
