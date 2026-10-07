@@ -1,6 +1,5 @@
 import { ActivityTimer, DEFAULTS } from './timer.js';
 import {
-  SNOOZE_MS,
   MEETING_MS,
   DAILY_SKIPS,
   deferReason,
