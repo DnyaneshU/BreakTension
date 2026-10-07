@@ -229,12 +229,32 @@ Escape hatches, so it is usable rather than a toy:
 - Snooze 5 minutes, once per cycle
 - 2 emergency skips per day, persisted
 - Quiet hours / work-hours window, configurable
-- Defer while a video call is active — detected via active mic/camera
-  capture state, not by hostname sniffing
+- Defer while a video call is active
 - Options page for all of the above
 
-**Exit criteria:** each hatch demonstrably works and persists across a
-browser restart.
+**Built, with one deviation.** Call detection was specified as "active
+mic/camera capture state, not hostname sniffing". No MV3 API exposes a page
+holding a mic or camera stream — `tabCapture` reports only tabs captured by
+an extension — so that is not implementable as written. Hostname sniffing
+was rejected in this spec and still is: it misses self-hosted and less
+common tools.
+
+Shipped instead: a manual "I'm in a meeting" toggle, which is honest and has
+no false positives. Its real weakness is that someone flips it, forgets, and
+the product goes quiet forever. That is answered by a one-hour expiry rather
+than left standing.
+
+`deferReason` in `extension/hatches.js` replaced `breakAllowed`, which is
+removed. Two gating functions would have meant two places to change a rule.
+
+The hatches appear on the lock screen as well as the popup: the person who
+genuinely cannot step outside is looking at the overlay.
+
+**Exit criteria met:** every hatch is unit-tested including budget
+exhaustion, midnight reset and expiry; state lives in `chrome.storage` and
+is reloaded on every worker wake, so it survives a restart; and a dismiss
+drops the server session, so the old token returns 410 and no hatch can bank
+a replayable unlock.
 
 ### Phase 5 — Writeup + demo
 

@@ -134,6 +134,43 @@ seconds off**, with no improvement in accuracy. When someone is standing in a
 car park waiting to be let back into their browser, that is not a tuning
 detail. Every request sends `think: false`.
 
+## The escape hatches
+
+A tool that locks your browser at the wrong moment gets uninstalled, and an
+uninstalled tool prevents exactly zero minutes of sitting. So there has to be
+a way out. But every way out is also a way to cheat, which means the design
+question is not *whether* to have them but how to keep them from becoming a
+dismiss button:
+
+| Hatch | Limit | Why that limit |
+|---|---|---|
+| **Snooze** | 5 min, once per break | Long enough to finish a thought, too short to be useful as an escape |
+| **Emergency skip** | 2 per day | Counted per local day and reset at midnight, so a bad afternoon doesn't become a bad week |
+| **In a meeting** | 1 hour, self-expiring | See below |
+| **Quiet hours** | configurable | 3am must never demand you go outside |
+
+They appear on the lock screen itself, not only in the toolbar popup. The
+person who genuinely cannot step outside right now is looking at the overlay;
+sending them hunting through a menu is how this gets uninstalled.
+
+None of them credits a break. A snooze or skip drops the server session, so
+the token behind the QR immediately returns 410 — a hatch cannot be used to
+bank a replayable unlock.
+
+### What the spec asked for and didn't get
+
+The spec called for detecting video calls from "active mic/camera capture
+state, not hostname sniffing." **That turned out not to be implementable.**
+No Manifest V3 API exposes a page holding a microphone or camera stream;
+`chrome.tabCapture` reports only tabs captured *by an extension*, not a page
+running its own call. Hostname sniffing was rejected in the spec and still
+is — it misses self-hosted and less common tools.
+
+So the shipped version is a manual toggle, which is honest and has no false
+positives. Its real weakness is obvious: flip it, forget about it, and the
+product goes quiet forever. That is answered with a **one-hour expiry** rather
+than left standing.
+
 ## Honest limitations
 
 I would rather state these than have you find them.
@@ -206,7 +243,7 @@ click *Load unpacked*, and select the `extension/` folder.
 ### Useful commands
 
 ```bash
-npm test                                      # 115 tests, no framework
+npm test                                      # 137 tests, no framework
 node scripts/verify-image.js photo.jpg        # judge any photo from the CLI
 node scripts/verify-image.js --list-tasks     # see the task pool
 BT_MODEL=llava:13b npm run server             # swap the model
