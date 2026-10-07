@@ -22,7 +22,7 @@ export const FAIL = false;
 
 const OLLAMA_URL = process.env.BT_OLLAMA_URL ?? 'http://localhost:11434';
 const MODEL = process.env.BT_MODEL ?? 'gemma4:e4b';
-const TIMEOUT_MS = Number(process.env.BT_TIMEOUT_MS ?? 30_000);
+const TIMEOUT_MS = Number(process.env.BT_TIMEOUT_MS ?? 60_000);
 
 /** Booleans sometimes arrive as the strings "true"/"false". */
 function asBool(v) {

@@ -12,7 +12,7 @@
  */
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import { judge } from '../server/gemma.js';
+import { judgeStaged } from '../server/gemma.js';
 import { TASKS, pickTask } from '../server/tasks.js';
 
 const args = process.argv.slice(2);
@@ -72,7 +72,13 @@ for (const file of files) {
   }
 
   const started = Date.now();
-  const v = await judge({ imageB64: buf.toString('base64'), task });
+  const v = await judgeStaged({
+    imageB64: buf.toString('base64'),
+    task,
+    onProgress: wantJson ? undefined : (stage) => {
+      process.stdout.write(`\r\x1b[K${C.dim}checking ${stage}...${C.off}`);
+    },
+  });
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 
   if (wantJson) {
@@ -80,7 +86,7 @@ for (const file of files) {
   } else {
     process.stdout.write('\r\x1b[K');
     const badge = v.ok ? `${C.green}PASS${C.off}` : `${C.red}FAIL${C.off}`;
-    console.log(`${badge} ${C.dim}${elapsed}s${C.off}`);
+    console.log(`${badge} ${C.dim}${elapsed}s${C.off}${v.stage && !v.ok ? ` ${C.dim}(failed at: ${v.stage})${C.off}` : ''}`);
     console.log(`  outdoor=${mark(v.outdoor)} glass=${mark(!v.through_glass)} screen=${mark(!v.screen_photo)} task=${mark(v.task_done)}`);
     console.log(`  ${C.dim}${v.reason}${C.off}`);
   }
