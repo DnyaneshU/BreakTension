@@ -230,3 +230,222 @@ export async function judge({ imageB64, task, fetchImpl = fetch, model = MODEL, 
   const content = payload?.message?.content ?? '';
   return parseVerdict(content);
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Two-stage judge
+//
+// Measured on the Phase 1 fixtures: asking all six questions in one prompt
+// made Gemma answer `through_glass: false` on an image with an obvious
+// window frame. Asking about glass ALONE got it right — and still correctly
+// said `false` for a genuine outdoor photo. The model can see the frame; the
+// combined prompt was diluting its attention across six questions.
+//
+// So we ask twice. Stage 1 is authenticity: are you actually outside, and is
+// this a real scene? Stage 2 is the gesture. Stage 1 short-circuits, which
+// also makes the common rejection the fast one.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Stage 1a: glass.
+ *
+ * MEASURED: the long checklist prompt that asked about frames, bars,
+ * reflections, haze, bezels and lighting all at once detected the window
+ * fixture 0/5 times. This short, single-question prompt detects it 3/3 with
+ * 0/3 false positives on two genuine outdoor photos. Brevity is the fix —
+ * resist the urge to add bullet points here.
+ */
+export function buildGlassPrompt() {
+  return 'Where is the camera standing: outdoors in the open air, or indoors looking out through a window? Look for a window frame, glazing bars, or reflections on glass. Reply with ONLY JSON: {"through_glass": true/false, "evidence": "one short sentence"}';
+}
+
+/** Stage 1b: is this a real scene, or a photo of a screen? */
+export function buildScreenPrompt() {
+  return 'Is this a photograph of a screen, monitor or printed picture, rather than a real scene? Look for a pixel grid, moire, scanlines or a bezel. Reply with ONLY JSON: {"screen_photo": true/false, "evidence": "one short sentence"}';
+}
+
+/** Stage 1c: is the camera outdoors at all? */
+export function buildOutdoorPrompt() {
+  return 'Is this photo taken outdoors in the open air? Open sky, plants, ground or a street seen from outside all count. A room, desk, office or car interior does not. Reply with ONLY JSON: {"outdoor": true/false, "evidence": "one short sentence"}';
+}
+
+/** Stage 2: was the assigned gesture performed? */
+export function buildTaskPrompt(task) {
+  const check = task?.check ?? 'the assigned task was performed';
+  return `Look at this photo and judge one thing only.
+
+Required: ${check}
+
+Answer:
+- task_done: Is that requirement clearly met in this photo?
+- reason: One short sentence to the person. If rejecting, say what is missing.
+
+Reply with ONLY this JSON, no other text:
+{"task_done": true/false, "reason": "..."}`;
+}
+
+function stageVerdict(fields) {
+  const reason =
+    typeof fields.reason === 'string' && fields.reason.trim() ? fields.reason.trim() : 'Verification failed.';
+  return { ok: FAIL, ...fields, reason };
+}
+
+/** Parse a single-field stage response. Unreadable or absent => fail closed. */
+export function parseFlag(raw, field, { failValue = true } = {}) {
+  const obj = extractJsonObject(typeof raw === 'string' ? raw : '');
+  const evidence =
+    obj && typeof obj.evidence === 'string' && obj.evidence.trim() ? obj.evidence.trim() : null;
+  if (!obj) return { value: failValue, readable: false, evidence: null };
+  const v = asBool(obj[field]);
+  return { value: v === null ? failValue : v, readable: v !== null, evidence };
+}
+
+export function parseAuthenticity(raw) {
+  const obj = extractJsonObject(typeof raw === 'string' ? raw : '');
+  if (!obj) {
+    return stageVerdict({
+      ok: FAIL,
+      outdoor: false,
+      through_glass: true,
+      screen_photo: true,
+      reason: 'Could not read the check result. Take the photo again.',
+    });
+  }
+
+  const outdoor = asBool(obj.outdoor);
+  const glass = asBool(obj.through_glass);
+  const screen = asBool(obj.screen_photo);
+
+  const ok = outdoor === true && glass === false && screen === false;
+
+  let reason = typeof obj.reason === 'string' && obj.reason.trim() ? obj.reason.trim() : null;
+  if (!ok && !reason) {
+    if (glass === true) reason = 'That looks like it was taken through a window. Go all the way outside.';
+    else if (screen === true) reason = 'That looks like a photo of a screen.';
+    else if (outdoor === false) reason = 'That does not look like it was taken outdoors.';
+    else reason = 'The check was incomplete. Take the photo again.';
+  }
+
+  return stageVerdict({
+    ok,
+    outdoor: outdoor ?? false,
+    through_glass: glass ?? true,
+    screen_photo: screen ?? true,
+    reason: reason ?? 'Looks genuinely outdoors.',
+  });
+}
+
+export function parseTask(raw) {
+  const obj = extractJsonObject(typeof raw === 'string' ? raw : '');
+  if (!obj) {
+    return stageVerdict({ ok: FAIL, task_done: false, reason: 'Could not read the check result. Try again.' });
+  }
+  const done = asBool(obj.task_done);
+  const reason = typeof obj.reason === 'string' && obj.reason.trim() ? obj.reason.trim() : null;
+
+  return stageVerdict({
+    ok: done === true,
+    task_done: done ?? false,
+    reason: reason ?? (done === true ? 'Task done.' : 'The task was not done. Check the instruction and retake.'),
+  });
+}
+
+/** One Ollama vision call returning raw text, or null on any transport error. */
+async function askOllama({ prompt, image, fetchImpl, model, url }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetchImpl(`${url}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        think: false,
+        options: { num_predict: 160, temperature: 0 },
+        messages: [{ role: 'user', content: prompt, images: [image] }],
+      }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      return { error: res.status === 404 ? `Model "${model}" is not available. Run: ollama pull ${model}` : `Ollama returned status ${res.status}.` };
+    }
+    const payload = await res.json();
+    // `content` only — never `thinking`.
+    return { text: payload?.message?.content ?? '' };
+  } catch (err) {
+    return {
+      error:
+        err?.name === 'AbortError'
+          ? 'The model took too long to answer. Try again.'
+          : `Could not reach Ollama at ${url}. Is it running?`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Judge a photo.
+ *
+ * Four short questions instead of one long prompt, because a long prompt
+ * measurably loses the glass signal (0/5 vs 3/3 on the window fixture).
+ * Checks run cheapest-rejection-first and short-circuit, so the common
+ * failure is also the fast one.
+ *
+ * Returns a verdict whose `stage` names what failed: 'outdoor', 'glass',
+ * 'screen', 'task', or 'complete'.
+ */
+export async function judgeStaged({ imageB64, task, fetchImpl = fetch, model = MODEL, url = OLLAMA_URL, onProgress }) {
+  const image = String(imageB64 ?? '').replace(/^data:image\/[a-zA-Z+]+;base64,/, '');
+  if (!image) {
+    return { ok: FAIL, stage: 'outdoor', outdoor: false, through_glass: true, screen_photo: true, task_done: false, reason: 'No photo was received. Try again.' };
+  }
+
+  const base = { outdoor: false, through_glass: true, screen_photo: true, task_done: false };
+  const ask = (prompt) => askOllama({ prompt, image, fetchImpl, model, url });
+
+  // 1. Outdoors at all?
+  onProgress?.('outdoor');
+  const r1 = await ask(buildOutdoorPrompt());
+  if (r1.error) return { ok: FAIL, stage: 'outdoor', ...base, reason: r1.error };
+  const outdoor = parseFlag(r1.text, 'outdoor', { failValue: false });
+  if (outdoor.value !== true) {
+    return { ok: FAIL, stage: 'outdoor', ...base,
+      reason: outdoor.evidence ?? 'That does not look like it was taken outdoors.' };
+  }
+
+  // 2. Through a window? The central cheat.
+  onProgress?.('glass');
+  const r2 = await ask(buildGlassPrompt());
+  if (r2.error) return { ok: FAIL, stage: 'glass', ...base, outdoor: true, reason: r2.error };
+  const glass = parseFlag(r2.text, 'through_glass', { failValue: true });
+  if (glass.value !== false) {
+    return { ok: FAIL, stage: 'glass', ...base, outdoor: true,
+      reason: glass.evidence
+        ? `${glass.evidence} Go all the way outside.`
+        : 'That looks like it was taken through a window. Go all the way outside.' };
+  }
+
+  // 3. Photo of a screen?
+  onProgress?.('screen');
+  const r3 = await ask(buildScreenPrompt());
+  if (r3.error) return { ok: FAIL, stage: 'screen', ...base, outdoor: true, through_glass: false, reason: r3.error };
+  const screen = parseFlag(r3.text, 'screen_photo', { failValue: true });
+  if (screen.value !== false) {
+    return { ok: FAIL, stage: 'screen', ...base, outdoor: true, through_glass: false,
+      reason: screen.evidence ?? 'That looks like a photo of a screen.' };
+  }
+
+  // 4. Was the gesture performed?
+  onProgress?.('task');
+  const r4 = await ask(buildTaskPrompt(task));
+  if (r4.error) {
+    return { ok: FAIL, stage: 'task', ...base, outdoor: true, through_glass: false, screen_photo: false, reason: r4.error };
+  }
+  const t = parseTask(r4.text);
+  const shared = { outdoor: true, through_glass: false, screen_photo: false };
+  if (!t.ok) return { ok: FAIL, stage: 'task', ...shared, task_done: false, reason: t.reason };
+
+  return { ok: PASS, stage: 'complete', ...shared, task_done: true, reason: t.reason };
+}
