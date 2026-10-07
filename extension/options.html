@@ -1,0 +1,51 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>BreakTension settings</title>
+<style>
+  :root { --bg:#0b0f0c; --ink:#e9f1ea; --muted:#92a69a; --line:#24312a; --grass:#5fd38a; }
+  body { max-width:560px; margin:0 auto; padding:40px 24px; background:var(--bg); color:var(--ink);
+         font:15px/1.6 ui-sans-serif,system-ui,"Segoe UI",sans-serif; }
+  h1 { font-size:22px; font-weight:650; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 28px; font-size:14px; }
+  label { display:block; margin:18px 0 6px; font-weight:600; font-size:14px; }
+  .help { color:var(--muted); font-size:13px; font-weight:400; margin-top:2px; }
+  input[type=number], select { background:#121a14; color:var(--ink); border:1px solid var(--line);
+    border-radius:9px; padding:9px 11px; font:inherit; width:110px; }
+  .check { display:flex; gap:9px; align-items:flex-start; margin:18px 0; }
+  button { margin-top:26px; font:inherit; font-weight:600; border:0; border-radius:10px;
+           padding:11px 20px; background:var(--grass); color:#06281a; cursor:pointer; }
+  .saved { color:var(--grass); margin-left:12px; font-size:13px; opacity:0; transition:opacity .2s; }
+  .saved.on { opacity:1; }
+  hr { border:0; border-top:1px solid var(--line); margin:30px 0; }
+  .note { color:var(--muted); font-size:13px; }
+</style>
+<h1>BreakTension</h1>
+<p class="sub">Your browser won't work until you go outside. Verified locally by Gemma.</p>
+
+<label>Desk time before a break
+  <div class="help">Only active browsing counts. Idle time and long absences do not.</div>
+</label>
+<input type="number" id="work" min="5" max="180" step="5"> minutes
+
+<label>Quiet hours
+  <div class="help">No breaks demanded between these hours.</div>
+</label>
+<input type="number" id="qs" min="0" max="23"> : 00 &nbsp;to&nbsp; <input type="number" id="qe" min="0" max="23"> : 00
+
+<div class="check">
+  <input type="checkbox" id="wd">
+  <label for="wd" style="margin:0">Weekdays only
+    <div class="help">Skip Saturday and Sunday entirely.</div>
+  </label>
+</div>
+
+<button id="save">Save</button><span class="saved" id="saved">Saved</span>
+
+<hr>
+<p class="note">
+  The verifier runs on your own machine at <code>https://localhost:8787</code>.
+  Start it with <code>npm run server</code>. Photos are judged by Gemma through
+  Ollama and are never uploaded anywhere.
+</p>
+
+<script src="options.js"></script>

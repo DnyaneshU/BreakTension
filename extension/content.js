@@ -1,0 +1,172 @@
+/**
+ * The lock overlay.
+ *
+ * Injected into every tab. Lives in a closed shadow root so the host page's
+ * CSS cannot restyle it and page scripts cannot easily reach in and remove
+ * it. This is not a security boundary — a determined user has devtools — but
+ * it does stop the overlay from being broken accidentally by whatever page
+ * happens to be open, which is the realistic failure.
+ */
+
+const HOST_ID = 'breaktension-lock-host';
+let host = null;
+let root = null;
+let qrLoaded = null;
+
+const STAGE_LABELS = {
+  outdoor: 'Checking you are outdoors…',
+  glass: 'Checking it is not through a window…',
+  screen: 'Checking it is a real scene…',
+  task: 'Checking the task…',
+};
+
+function ensureHost() {
+  if (host && document.documentElement.contains(host)) return root;
+
+  host = document.createElement('div');
+  host.id = HOST_ID;
+  host.style.cssText = 'all:initial;position:fixed;inset:0;z-index:2147483647';
+  root = host.attachShadow({ mode: 'closed' });
+  document.documentElement.appendChild(host);
+  return root;
+}
+
+function teardown() {
+  try {
+    host?.remove();
+  } catch {}
+  host = null;
+  root = null;
+  document.documentElement.style.overflow = '';
+}
+
+/** Load the QR renderer lazily; it is only needed while locked. */
+async function renderQR(url, size) {
+  qrLoaded ??= import(chrome.runtime.getURL('qr.js'));
+  try {
+    const { qrSVG } = await qrLoaded;
+    return qrSVG(url, { size, margin: 3, dark: '#0b140d', light: '#ffffff' });
+  } catch {
+    return null;
+  }
+}
+
+async function showLock({ task, captureUrl }) {
+  const r = ensureHost();
+  document.documentElement.style.overflow = 'hidden';
+
+  r.innerHTML = `
+    <style>
+      :host { all: initial; }
+      * { box-sizing:border-box; margin:0; }
+      .wrap {
+        position:fixed; inset:0;
+        background:
+          radial-gradient(1200px 600px at 50% -10%, #16301f 0%, transparent 60%),
+          #080c09;
+        color:#e9f1ea;
+        font:16px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+        display:grid; place-items:center; padding:28px; overflow:auto;
+      }
+      .card { width:100%; max-width:560px; text-align:center; }
+      .eyebrow { font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:#7f9a8a; }
+      h1 { font-size:clamp(26px,5vw,40px); font-weight:650; letter-spacing:-.02em; margin:10px 0 8px; }
+      .sub { color:#9bb0a3; font-size:15px; margin-bottom:22px; }
+      .task {
+        border:1px solid #27382e; background:#101710; border-radius:14px;
+        padding:16px 18px; margin-bottom:20px;
+      }
+      .task .lbl { font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:#7f9a8a; }
+      .task .txt { font-size:19px; font-weight:600; color:#6fe39a; margin-top:5px; }
+      .qr { background:#fff; border-radius:16px; padding:14px; display:inline-block; line-height:0; }
+      .qr svg { display:block; width:200px; height:200px; }
+      .hint { color:#9bb0a3; font-size:14px; margin-top:16px; }
+      .url {
+        margin-top:10px; font:12px/1.5 ui-monospace,monospace; color:#7f9a8a;
+        word-break:break-all; max-width:42ch; margin-inline:auto;
+      }
+      .status { margin-top:18px; font-size:14px; min-height:22px; color:#6fe39a; }
+      .status.bad { color:#f09a8a; }
+      .why { margin-top:26px; padding-top:18px; border-top:1px solid #1c2a21; color:#6d8478; font-size:13px; }
+      .ok { font-size:30px; font-weight:650; color:#6fe39a; }
+      @media (prefers-reduced-motion:no-preference) {
+        .card { animation:rise .28s ease-out both; }
+        @keyframes rise { from { opacity:0; transform:translateY(8px); } }
+      }
+    </style>
+    <div class="wrap">
+      <div class="card">
+        <div class="eyebrow">BreakTension</div>
+        <h1>Time to go outside</h1>
+        <p class="sub">You have been at the screen for a while. Your browser is locked until you prove you stepped out.</p>
+
+        <div class="task">
+          <div class="lbl">Your task</div>
+          <div class="txt" id="task">${escapeHtml(task || '—')}</div>
+        </div>
+
+        <div class="qr" id="qr"><div style="width:200px;height:200px"></div></div>
+
+        <p class="hint">Scan with your phone, go outside, take the photo.</p>
+        <div class="url" id="url">${escapeHtml(captureUrl || '')}</div>
+
+        <div class="status" id="status"></div>
+
+        <p class="why">
+          The photo is judged by Gemma on your own laptop. Nothing is uploaded,
+          no account, no internet.
+        </p>
+      </div>
+    </div>`;
+
+  const svg = await renderQR(captureUrl, 200);
+  const slot = r.getElementById('qr');
+  if (svg && slot) slot.innerHTML = svg;
+  else if (slot) slot.innerHTML = '<div style="width:200px;padding:20px;color:#333;font:13px system-ui">Open the link below on your phone.</div>';
+}
+
+function setStatus(text, bad) {
+  const el = root?.getElementById('status');
+  if (!el) return;
+  el.textContent = text;
+  el.className = bad ? 'status bad' : 'status';
+}
+
+async function showUnlocked(durationMs) {
+  if (!root) return teardown();
+  const mins = durationMs ? Math.max(1, Math.round(durationMs / 60000)) : null;
+  const card = root.querySelector('.card');
+  if (card) {
+    card.innerHTML = `
+      <div class="eyebrow">BreakTension</div>
+      <h1>Welcome back</h1>
+      <p class="ok">${mins ? `${mins} minute${mins === 1 ? '' : 's'} outside` : 'Verified'}</p>
+      <p class="sub" style="margin-top:14px">Unlocking…</p>`;
+  }
+  setTimeout(teardown, 1400);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === 'bt-lock') showLock(msg);
+  else if (msg?.type === 'bt-unlock') showUnlocked(msg.durationMs);
+  else if (msg?.type === 'bt-stage') setStatus(STAGE_LABELS[msg.stage] ?? 'Checking…', false);
+  else if (msg?.type === 'bt-failed') setStatus(msg.reason || 'That did not pass. Try again.', true);
+});
+
+// If the worker locked things while this tab was loading, catch up.
+chrome.runtime.sendMessage({ type: 'bt-status' }).then((s) => {
+  if (s?.locked) {
+    fetch('https://localhost:8787/state')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.state && d.state !== 'idle' && d.task) {
+          showLock({ task: d.task.text, captureUrl: `https://${d.lan}:${d.port}/capture` });
+        }
+      })
+      .catch(() => {});
+  }
+}).catch(() => {});
