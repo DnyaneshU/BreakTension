@@ -239,6 +239,16 @@ if (cert) {
   console.warn('!  Running over HTTP: the phone camera will NOT work, only localhost.\n');
 }
 
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n  Port ${PORT} is already in use.`);
+    console.error(`  Another BreakTension server is probably running.`);
+    console.error(`  Stop it, or start this one on another port:  BT_PORT=8788 npm run server\n`);
+    process.exit(1);
+  }
+  throw err;
+});
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n  BreakTension server`);
   console.log(`  ├─ laptop : ${scheme}://localhost:${PORT}`);
