@@ -141,14 +141,21 @@ function messageTypesHandled(src) {
   return types;
 }
 
-test('every message the worker sends to tabs is handled by the content script', () => {
-  const sent = messageTypesSent(read('background.js'));
+test('every message the worker broadcasts to tabs is handled by the content script', () => {
+  const src = read('background.js');
   const handled = messageTypesHandled(read('content.js'));
 
-  // Types the worker sends to tabs, as opposed to ones it receives.
-  for (const t of ['bt-lock', 'bt-unlock', 'bt-stage', 'bt-failed']) {
-    assert.ok(sent.has(t), `background.js should send ${t}`);
-    assert.ok(handled.has(t), `content.js must handle ${t}`);
+  // Derived from the source rather than a hardcoded list: a hardcoded list
+  // silently passes when a NEW broadcast type is added, which is exactly the
+  // bug this test is supposed to catch.
+  const broadcast = new Set();
+  for (const m of src.matchAll(/broadcastToTabs\(\s*\{\s*type:\s*'(bt-[a-z-]+)'/g)) broadcast.add(m[1]);
+  for (const m of src.matchAll(/chrome\.tabs\.sendMessage\([^,]+,\s*\{\s*type:\s*'(bt-[a-z-]+)'/g)) broadcast.add(m[1]);
+
+  assert.ok(broadcast.size >= 4, `expected several broadcast types, found ${[...broadcast]}`);
+
+  for (const t of broadcast) {
+    assert.ok(handled.has(t), `background.js sends ${t} to tabs but content.js has no handler`);
   }
 });
 
@@ -183,4 +190,48 @@ test('the content script does not fetch the server directly', () => {
   // It runs on the host page's origin, so a direct fetch needs CORS and
   // duplicates the server address. It asks the worker instead.
   assert.doesNotMatch(read('content.js'), /fetch\(\s*['"`]https?:/);
+});
+
+// --- escape hatches -------------------------------------------------------
+
+test('hatch state is persisted and reloaded, so it survives a restart', () => {
+  const src = read('background.js');
+  // MV3 tears the worker down; anything not in storage is lost silently.
+  assert.match(src, /chrome\.storage\.local\.get\(\[[^\]]*'hatches'/, 'hatches must be loaded on wake');
+  assert.match(src, /chrome\.storage\.local\.set\(\{[^}]*hatches/, 'hatches must be saved');
+});
+
+test('every hatch action has a worker handler', () => {
+  const handled = messageTypesHandled(read('background.js'));
+  for (const t of ['bt-snooze', 'bt-skip', 'bt-set-meeting']) {
+    assert.ok(handled.has(t), `missing handler: ${t}`);
+  }
+});
+
+test('the hatches are reachable from the lock screen, not just the popup', () => {
+  // Someone who genuinely cannot go outside is looking at the overlay.
+  const src = read('content.js');
+  for (const t of ['bt-snooze', 'bt-skip', 'bt-set-meeting']) {
+    assert.ok(src.includes(t), `lock screen should offer ${t}`);
+  }
+});
+
+test('a snooze or skip does not credit a break', () => {
+  const src = read('background.js');
+  const dismiss = src.match(/async function dismissLock\(\)[\s\S]*?\n\}/)[0];
+  assert.doesNotMatch(dismiss, /creditBreak/, 'only a verified photo may credit a break');
+  assert.match(dismiss, /\/reset/, 'the server session must be dropped so the token cannot be replayed');
+});
+
+test('a verified break restores the snooze for the next cycle', () => {
+  const src = read('background.js');
+  const unlock = src.match(/async function unlockAll\([\s\S]*?\n\}/)[0];
+  assert.match(unlock, /resetCycle/);
+  assert.match(unlock, /creditBreak/);
+});
+
+test('the popup explains what a pending break is waiting on', () => {
+  // A timer sitting at zero with nothing happening looks broken.
+  assert.match(read('background.js'), /deferredBy/);
+  assert.match(read('popup.js'), /deferredBy/);
 });

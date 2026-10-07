@@ -79,35 +79,3 @@ export class ActivityTimer {
     return { activeMs: this.activeMs, remainingMs: this.remainingMs(), due: this.isDue(), state: this.state };
   }
 }
-
-/**
- * Is a break allowed right now?
- *
- * Locking someone's browser at 2am, or during a meeting, turns a useful tool
- * into one they uninstall. These are not edge cases; they are the difference
- * between a demo and something you keep running.
- */
-export function breakAllowed({
-  date,
-  quietStartHour = 22,
-  quietEndHour = 7,
-  workDaysOnly = false,
-  inCall = false,
-} = {}) {
-  if (inCall) return { allowed: false, why: 'in a call' };
-
-  const h = date.getHours();
-  const inQuiet =
-    quietStartHour > quietEndHour
-      ? h >= quietStartHour || h < quietEndHour // window crosses midnight
-      : h >= quietStartHour && h < quietEndHour;
-
-  if (inQuiet) return { allowed: false, why: 'quiet hours' };
-
-  if (workDaysOnly) {
-    const day = date.getDay();
-    if (day === 0 || day === 6) return { allowed: false, why: 'weekend' };
-  }
-
-  return { allowed: true, why: null };
-}

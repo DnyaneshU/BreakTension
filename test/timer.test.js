@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ActivityTimer, breakAllowed, DEFAULTS } from '../extension/timer.js';
+import { ActivityTimer, DEFAULTS } from '../extension/timer.js';
 
 const MIN = 60 * 1000;
 
@@ -98,39 +98,4 @@ test('the interval is configurable', () => {
   t.tick(now);
   for (let i = 0; i < 10; i++) t.tick((now += MIN));
   assert.equal(t.isDue(), true);
-});
-
-// --- breakAllowed ---------------------------------------------------------
-
-const at = (h, day = 2) => {
-  const d = new Date(2026, 9, 7, h, 0, 0); // Wed 7 Oct 2026
-  if (day !== undefined) while (d.getDay() !== day) d.setDate(d.getDate() + 1);
-  return d;
-};
-
-test('breaks are allowed during the working day', () => {
-  assert.equal(breakAllowed({ date: at(14) }).allowed, true);
-});
-
-test('no breaks during quiet hours at night', () => {
-  assert.equal(breakAllowed({ date: at(23) }).allowed, false);
-  assert.equal(breakAllowed({ date: at(3) }).allowed, false, '3am must not demand you go outside');
-});
-
-test('quiet hours window crossing midnight is handled', () => {
-  const r = breakAllowed({ date: at(6), quietStartHour: 22, quietEndHour: 7 });
-  assert.equal(r.allowed, false);
-  assert.equal(breakAllowed({ date: at(8), quietStartHour: 22, quietEndHour: 7 }).allowed, true);
-});
-
-test('an active call defers the break', () => {
-  const r = breakAllowed({ date: at(14), inCall: true });
-  assert.equal(r.allowed, false);
-  assert.match(r.why, /call/);
-});
-
-test('weekends can be excluded', () => {
-  const sat = at(14, 6);
-  assert.equal(breakAllowed({ date: sat, workDaysOnly: true }).allowed, false);
-  assert.equal(breakAllowed({ date: sat, workDaysOnly: false }).allowed, true);
 });

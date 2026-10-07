@@ -87,6 +87,16 @@ async function showLock({ task, captureUrl }) {
       }
       .status { margin-top:18px; font-size:14px; min-height:22px; color:#6fe39a; }
       .status.bad { color:#f09a8a; }
+      .hatches {
+        margin-top:22px; display:flex; gap:9px; justify-content:center; flex-wrap:wrap;
+      }
+      .hatches button {
+        font:inherit; font-size:13px; color:#9bb0a3; background:transparent;
+        border:1px solid #27382e; border-radius:9px; padding:8px 13px; cursor:pointer;
+      }
+      .hatches button:hover:not([disabled]) { color:#e9f1ea; border-color:#3a5244; }
+      .hatches button[disabled] { opacity:.35; cursor:default; }
+      .hatch-note { margin-top:11px; color:#6d8478; font-size:12px; min-height:16px; }
       .why { margin-top:26px; padding-top:18px; border-top:1px solid #1c2a21; color:#6d8478; font-size:13px; }
       .ok { font-size:30px; font-weight:650; color:#6fe39a; }
       @media (prefers-reduced-motion:no-preference) {
@@ -112,6 +122,13 @@ async function showLock({ task, captureUrl }) {
 
         <div class="status" id="status"></div>
 
+        <div class="hatches">
+          <button id="bt-snooze">Snooze 5 min</button>
+          <button id="bt-skip">Emergency skip</button>
+          <button id="bt-meeting">I'm in a meeting</button>
+        </div>
+        <div class="hatch-note" id="hatch-note"></div>
+
         <p class="why">
           The photo is judged by Gemma on your own laptop. Nothing is uploaded,
           no account, no internet.
@@ -123,6 +140,67 @@ async function showLock({ task, captureUrl }) {
   const slot = r.getElementById('qr');
   if (svg && slot) slot.innerHTML = svg;
   else if (slot) slot.innerHTML = '<div style="width:200px;padding:20px;color:#333;font:13px system-ui">Open the link below on your phone.</div>';
+
+  await wireHatches(r);
+}
+
+/**
+ * The escape hatches, on the lock screen itself.
+ *
+ * They have to be reachable from here, not only the popup: someone who
+ * genuinely cannot step outside right now is looking at this overlay, and
+ * telling them to hunt through a toolbar menu is how a tool gets uninstalled.
+ *
+ * Each button is still a limited resource, and the note under them says what
+ * it costs, so the honest choice stays visible.
+ */
+async function wireHatches(r) {
+  const note = r.getElementById('hatch-note');
+  const snoozeBtn = r.getElementById('bt-snooze');
+  const skipBtn = r.getElementById('bt-skip');
+  const meetingBtn = r.getElementById('bt-meeting');
+  if (!snoozeBtn) return;
+
+  const status = await chrome.runtime.sendMessage({ type: 'bt-status' }).catch(() => null);
+
+  if (status) {
+    snoozeBtn.disabled = !status.canSnooze;
+    skipBtn.disabled = status.skipsLeft <= 0;
+    skipBtn.textContent = `Emergency skip (${status.skipsLeft} left today)`;
+    if (note) {
+      note.textContent = status.canSnooze
+        ? 'One snooze per break. Skips reset tomorrow.'
+        : 'Already snoozed this break.';
+    }
+  }
+
+  const act = async (type, pending) => {
+    for (const b of [snoozeBtn, skipBtn, meetingBtn]) b.disabled = true;
+    if (note) note.textContent = pending;
+
+    const res = await chrome.runtime.sendMessage({ type }).catch(() => null);
+    // On success the worker broadcasts bt-dismiss and this overlay goes away,
+    // so there is nothing to re-enable. On failure, say why.
+    if (!res?.ok && note) {
+      note.textContent = res?.reason ?? 'That did not work.';
+      if (status) {
+        snoozeBtn.disabled = !status.canSnooze;
+        skipBtn.disabled = status.skipsLeft <= 0;
+        meetingBtn.disabled = false;
+      }
+    }
+  };
+
+  snoozeBtn.onclick = () => act('bt-snooze', 'Snoozing…');
+  skipBtn.onclick = () => act('bt-skip', 'Skipping…');
+  meetingBtn.onclick = async () => {
+    for (const b of [snoozeBtn, skipBtn, meetingBtn]) b.disabled = true;
+    if (note) note.textContent = 'Holding breaks for an hour…';
+    const res = await chrome.runtime
+      .sendMessage({ type: 'bt-set-meeting', value: true })
+      .catch(() => null);
+    if (!res?.ok && note) note.textContent = 'That did not work.';
+  };
 }
 
 function setStatus(text, bad) {
@@ -153,6 +231,9 @@ function escapeHtml(s) {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'bt-lock') showLock(msg);
   else if (msg?.type === 'bt-unlock') showUnlocked(msg.durationMs);
+  // Snoozed or skipped: the overlay goes away without the "welcome back"
+  // celebration, because nobody went anywhere.
+  else if (msg?.type === 'bt-dismiss') teardown();
   else if (msg?.type === 'bt-stage') setStatus(STAGE_LABELS[msg.stage] ?? 'Checking…', false);
   else if (msg?.type === 'bt-failed') setStatus(msg.reason || 'That did not pass. Try again.', true);
 });

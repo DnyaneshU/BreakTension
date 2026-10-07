@@ -1,4 +1,18 @@
-import { ActivityTimer, breakAllowed, DEFAULTS } from './timer.js';
+import { ActivityTimer, DEFAULTS } from './timer.js';
+import {
+  SNOOZE_MS,
+  MEETING_MS,
+  DAILY_SKIPS,
+  deferReason,
+  skipsLeft,
+  useSkip,
+  useSnooze,
+  canSnooze,
+  startMeeting,
+  endMeeting,
+  meetingActive,
+  resetCycle,
+} from './hatches.js';
 
 /**
  * The service worker.
@@ -29,21 +43,23 @@ const DEFAULT_SETTINGS = {
 let timer = new ActivityTimer();
 let settings = { ...DEFAULT_SETTINGS };
 let lock = null; // { task, captureUrl } while locked, else null
+let hatches = {}; // snooze / skip / meeting state, see hatches.js
 let sse = null;
 
 // ── persistence ────────────────────────────────────────────────────────────
 
 async function load() {
-  const got = await chrome.storage.local.get(['activeMs', 'lastTick', 'settings', 'lock']);
+  const got = await chrome.storage.local.get(['activeMs', 'lastTick', 'settings', 'lock', 'hatches']);
   settings = { ...DEFAULT_SETTINGS, ...(got.settings ?? {}) };
   timer = new ActivityTimer({ config: { workMs: settings.workMs } });
   timer.activeMs = got.activeMs ?? 0;
   timer.lastTick = got.lastTick ?? null;
   lock = got.lock ?? null;
+  hatches = got.hatches ?? {};
 }
 
 const save = () =>
-  chrome.storage.local.set({ activeMs: timer.activeMs, lastTick: timer.lastTick, lock });
+  chrome.storage.local.set({ activeMs: timer.activeMs, lastTick: timer.lastTick, lock, hatches });
 
 const saveSettings = () => chrome.storage.local.set({ settings });
 
@@ -137,8 +153,27 @@ async function lockAll() {
   return true;
 }
 
+/**
+ * Take the overlay down without crediting a break.
+ *
+ * A snooze or skip has to clear a lock that is already on screen, or the
+ * hatch is unreachable exactly when it is needed. This deliberately does not
+ * call creditBreak: only a verified photo does that, and /reset tells the
+ * server to drop the session so the old token cannot be replayed.
+ */
+async function dismissLock() {
+  if (!lock) return;
+  lock = null;
+  await save();
+  await serverFetch('/reset', { method: 'POST' });
+  await broadcastToTabs({ type: 'bt-dismiss' });
+  setBadge(false);
+  closeEvents();
+}
+
 async function unlockAll(durationMs) {
   lock = null;
+  hatches = resetCycle(hatches); // a real break earns a fresh snooze
   timer.creditBreak(Date.now());
   await save();
   await serverFetch('/reset', { method: 'POST' });
@@ -171,25 +206,68 @@ async function tick() {
 
   if (!timer.isDue()) return;
 
-  const gate = breakAllowed({ date: new Date(), ...settings });
-  if (gate.allowed) await lockAll();
+  // Held back for a reason the user chose, or the clock. Stay due, so the
+  // break lands as soon as the reason clears rather than restarting the
+  // whole 35 minutes.
+  if (deferReason({ state: hatches, date: new Date(), settings })) return;
+
+  await lockAll();
 }
 
 // ── messages ───────────────────────────────────────────────────────────────
 
 const HANDLERS = {
-  'bt-status': async () => ({
-    ...timer.toJSON(),
-    locked: Boolean(lock),
-    enabled: settings.enabled,
-    serverUp: Boolean(await serverFetch('/state')),
-    settings,
-  }),
+  'bt-status': async () => {
+    const now = new Date();
+    return {
+      ...timer.toJSON(),
+      locked: Boolean(lock),
+      enabled: settings.enabled,
+      serverUp: Boolean(await serverFetch('/state')),
+      settings,
+      // Everything the popup needs to explain why nothing is happening.
+      deferredBy: timer.isDue() ? deferReason({ state: hatches, date: now, settings }) : null,
+      skipsLeft: skipsLeft(hatches, now),
+      dailySkips: DAILY_SKIPS,
+      canSnooze: canSnooze(hatches),
+      inMeeting: meetingActive(hatches, now),
+      meetingUntil: hatches.meetingUntil ?? null,
+    };
+  },
 
   // What a tab needs to render the overlay, including the token-bearing URL.
   'bt-lock-state': async () => ({ locked: Boolean(lock), ...(lock ?? {}) }),
 
   'bt-force-break': async () => ({ ok: await lockAll() }),
+
+  // Five more minutes, once per cycle.
+  'bt-snooze': async () => {
+    if (!canSnooze(hatches)) return { ok: false, reason: 'already snoozed this cycle' };
+    hatches = useSnooze(hatches, new Date());
+    await save();
+    await dismissLock();
+    return { ok: true, until: hatches.snoozeUntil };
+  },
+
+  // Spend one of the day's skips. Unlike a snooze this stands down the whole
+  // cycle, so it is budgeted rather than unlimited.
+  'bt-skip': async () => {
+    const now = new Date();
+    if (skipsLeft(hatches, now) <= 0) return { ok: false, reason: 'no skips left today' };
+    hatches = useSkip(hatches, now);
+    timer.creditBreak(Date.now()); // the cycle is over, honestly or not
+    await save();
+    await dismissLock();
+    return { ok: true, skipsLeft: skipsLeft(hatches, now) };
+  },
+
+  'bt-set-meeting': async (msg) => {
+    const now = new Date();
+    hatches = msg.value ? startMeeting(hatches, now, msg.ms ?? MEETING_MS) : endMeeting(hatches);
+    await save();
+    if (msg.value) await dismissLock();
+    return { ok: true, inMeeting: meetingActive(hatches, now), meetingUntil: hatches.meetingUntil };
+  },
 
   'bt-set-enabled': async (msg) => {
     settings.enabled = Boolean(msg.value);

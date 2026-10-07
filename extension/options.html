@@ -42,6 +42,20 @@
 <button id="save">Save</button><span class="saved" id="saved">Saved</span>
 
 <hr>
+
+<h2 style="font-size:16px;margin:0 0 4px">Escape hatches</h2>
+<p class="note" style="margin-bottom:0">
+  These are deliberately limited, because an unlimited way out is just a
+  dismiss button:
+</p>
+<ul class="note" style="margin-top:8px;padding-left:20px;line-height:1.8">
+  <li><b>Snooze</b> &mdash; 5 minutes, once per break.</li>
+  <li><b>Emergency skip</b> &mdash; 2 per day, reset at midnight.</li>
+  <li><b>In a meeting</b> &mdash; holds breaks for an hour, then expires on
+      its own so a forgotten toggle cannot switch the product off.</li>
+</ul>
+
+<hr>
 <p class="note">
   The verifier runs on your own machine at <code>https://localhost:8787</code>.
   Start it with <code>npm run server</code>. Photos are judged by Gemma through

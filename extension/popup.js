@@ -13,6 +13,15 @@ function render(s) {
   $('state').textContent = s.locked ? 'locked' : s.enabled ? 'counting' : 'paused';
   $('toggle').textContent = s.enabled ? 'Pause' : 'Resume';
   $('force').disabled = !s.serverUp;
+
+  // Why is the timer sitting at zero with nothing happening? Say so, rather
+  // than looking broken.
+  $('deferRow').style.display = s.deferredBy ? 'flex' : 'none';
+  $('defer').textContent = s.deferredBy ?? '';
+
+  $('skips').textContent = `${s.skipsLeft} of ${s.dailySkips}`;
+
+  $('meeting').textContent = s.inMeeting ? 'End meeting' : "I'm in a meeting";
 }
 
 async function refresh() {
@@ -27,6 +36,12 @@ $('force').onclick = async () => {
 $('toggle').onclick = async () => {
   const s = await chrome.runtime.sendMessage({ type: 'bt-status' });
   await chrome.runtime.sendMessage({ type: 'bt-set-enabled', value: !s.enabled });
+  refresh();
+};
+
+$('meeting').onclick = async () => {
+  const s = await chrome.runtime.sendMessage({ type: 'bt-status' });
+  await chrome.runtime.sendMessage({ type: 'bt-set-meeting', value: !s.inMeeting });
   refresh();
 };
 
