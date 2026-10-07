@@ -52,7 +52,9 @@ contradicts the privacy argument above. Design retained in Appendix A.
 balcony or a convincing photo-of-a-photo. The honest claim, which the
 writeup will make explicitly, is that this raises the cost of cheating
 above the cost of complying. Unbeatable verification is not achievable
-locally and is not the goal.
+locally and is not the goal. The window-photo cheat specifically is
+addressed by local hardening in Phase 4, not by peer review — see that
+phase for the reasoning.
 
 ## Verified environment
 
@@ -69,6 +71,13 @@ Confirmed on this machine 2026-10-07, not assumed:
 **Critical API detail:** `gemma4:e4b` returns a `message.thinking` field
 alongside `message.content`. Parsers must read `content` only. Ignoring this
 breaks JSON extraction.
+
+**Measured latency (Phase 1).** Thinking mode costs ~24s per judgement
+versus ~3s with `think: false`, with no gain in accuracy; the full
+six-field prompt exceeded a 45s timeout with thinking on. All requests
+send `think: false`, `temperature: 0` and `num_predict: 200`. End-to-end
+judgement on the fixtures is ~8s. Latency is a product requirement, not an
+optimization — someone is standing outside waiting to be let back in.
 
 Request shape (verified working):
 
@@ -185,7 +194,37 @@ correct verdict from Gemma.
 **Exit criteria:** full loop with no manual steps — work 35 min (or trigger
 manually), tabs lock, scan, go outside, photo, tabs unlock.
 
-### Phase 4 — Escape hatches (makes it usable, not a toy)
+### Phase 4 — Escape hatches + strict mode
+
+**Strict mode** addresses the window-photo cheat: leaning over and shooting
+the garden through the glass without leaving the chair. This is the central
+attack on the product — if it works, BreakTension is just a slow dismissible
+reminder.
+
+Peer review was considered as the defense and rejected. The reasoning, which
+belongs in the writeup:
+
+- Gemma already checks `through_glass` as a dedicated pass condition, and it
+  detected the difference correctly in Phase 1 testing. Reflections, frames,
+  blinds and sills are visually loud — this is one of the easier calls.
+- A peer sees the *same single photo* with *less* context, and their verdict
+  arrives hours later. It cannot gate an unlock, only assign retroactive
+  strikes. The cheater is already back at their desk.
+- It would mean uploading photos of the user's hands, street and home to a
+  server, to catch something the local model checks. That trade is bad on
+  the merits and destroys the privacy argument.
+
+Local hardening is stronger *and* instant:
+
+- **Two frames, a few seconds apart, from different angles.** A window shot
+  cannot produce genuine parallax against a nearby frame; stepping outside
+  and pivoting does. Gemma compares them for consistent scene geometry.
+- **Random gesture assigned at lock time** (already built in Phase 1) means
+  a stored photo cannot match.
+- **Shadow and lighting coherence** — a hand lit by direct sun with a cast
+  shadow is hard to fake through glass.
+
+Escape hatches, so it is usable rather than a toy:
 
 - Snooze 5 minutes, once per cycle
 - 2 emergency skips per day, persisted
