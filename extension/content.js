@@ -158,15 +158,16 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 
 // If the worker locked things while this tab was loading, catch up.
-chrome.runtime.sendMessage({ type: 'bt-status' }).then((s) => {
-  if (s?.locked) {
-    fetch('https://localhost:8787/state')
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.state && d.state !== 'idle' && d.task) {
-          showLock({ task: d.task.text, captureUrl: `https://${d.lan}:${d.port}/capture` });
-        }
-      })
-      .catch(() => {});
-  }
-}).catch(() => {});
+//
+// The worker is asked for the lock details rather than this script fetching
+// the server itself: a content script runs on the host page's origin, so a
+// direct fetch needs CORS and would duplicate the server address in a second
+// place. Asking the worker keeps one source of truth for the port.
+chrome.runtime
+  .sendMessage({ type: 'bt-lock-state' })
+  .then((lock) => {
+    if (lock?.locked && lock.task) {
+      showLock({ task: lock.task, captureUrl: lock.captureUrl });
+    }
+  })
+  .catch(() => {});

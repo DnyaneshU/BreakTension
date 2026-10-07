@@ -118,3 +118,69 @@ test('no remote script is loaded anywhere — the lock screen must work offline'
     assert.doesNotMatch(read(f), /<script[^>]+src=["']https?:/, `${f} must not load a remote script`);
   }
 });
+
+// --- message protocol -----------------------------------------------------
+
+/**
+ * The worker and the content script talk through string message types. A
+ * rename on one side is silent at load time and only shows up as an overlay
+ * that never appears, so the two sides are cross-checked here.
+ */
+
+function messageTypesSent(src) {
+  const types = new Set();
+  for (const m of src.matchAll(/type:\s*'(bt-[a-z-]+)'/g)) types.add(m[1]);
+  return types;
+}
+
+function messageTypesHandled(src) {
+  const types = new Set();
+  // `msg.type === 'x'`, a `'x':` handler-table key, or `'x': async`
+  for (const m of src.matchAll(/msg\??\.type === '(bt-[a-z-]+)'/g)) types.add(m[1]);
+  for (const m of src.matchAll(/^\s*'(bt-[a-z-]+)':/gm)) types.add(m[1]);
+  return types;
+}
+
+test('every message the worker sends to tabs is handled by the content script', () => {
+  const sent = messageTypesSent(read('background.js'));
+  const handled = messageTypesHandled(read('content.js'));
+
+  // Types the worker sends to tabs, as opposed to ones it receives.
+  for (const t of ['bt-lock', 'bt-unlock', 'bt-stage', 'bt-failed']) {
+    assert.ok(sent.has(t), `background.js should send ${t}`);
+    assert.ok(handled.has(t), `content.js must handle ${t}`);
+  }
+});
+
+test('every message the content script sends is handled by the worker', () => {
+  const sent = messageTypesSent(read('content.js'));
+  const handled = messageTypesHandled(read('background.js'));
+
+  for (const t of sent) {
+    assert.ok(handled.has(t), `content.js sends ${t} but background.js has no handler`);
+  }
+});
+
+test('every message the popup and options send is handled by the worker', () => {
+  const handled = messageTypesHandled(read('background.js'));
+  for (const f of ['popup.js', 'options.js']) {
+    for (const t of messageTypesSent(read(f))) {
+      assert.ok(handled.has(t), `${f} sends ${t} but background.js has no handler`);
+    }
+  }
+});
+
+test('the server address appears in exactly one place', () => {
+  // A second hardcoded host or port silently breaks BT_PORT.
+  const offenders = [];
+  for (const f of ['content.js', 'popup.js', 'options.js']) {
+    if (/localhost:\d+/.test(read(f))) offenders.push(f);
+  }
+  assert.deepEqual(offenders, [], 'only background.js should name the server');
+});
+
+test('the content script does not fetch the server directly', () => {
+  // It runs on the host page's origin, so a direct fetch needs CORS and
+  // duplicates the server address. It asks the worker instead.
+  assert.doesNotMatch(read('content.js'), /fetch\(\s*['"`]https?:/);
+});

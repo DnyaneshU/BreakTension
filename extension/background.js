@@ -3,64 +3,78 @@ import { ActivityTimer, breakAllowed, DEFAULTS } from './timer.js';
 /**
  * The service worker.
  *
- * MV3 kills this worker after ~30 seconds idle, so nothing long-lived can
- * live in a closure here: the timer's accrued state is written to
- * chrome.storage on every tick and reloaded on wake. chrome.alarms, not
- * setTimeout, is what survives the worker being torn down.
+ * MV3 tears this worker down after ~30 seconds idle, so nothing durable can
+ * live in a module-level variable: everything that must survive is written to
+ * chrome.storage each tick and reloaded on wake. chrome.alarms, not
+ * setTimeout, is what still fires after a teardown.
+ *
+ * The current lock — task text and capture URL, token included — is stored
+ * too. Without it, a tab that loads while the browser is locked has no way to
+ * learn what to display, and `/state` deliberately does not hand out the
+ * token.
  */
 
 const SERVER = 'https://localhost:8787';
 const ALARM = 'bt-tick';
 const TICK_MINUTES = 0.5;
 
-let timer = new ActivityTimer();
-let settings = {
+const DEFAULT_SETTINGS = {
   workMs: DEFAULTS.workMs,
   quietStartHour: 22,
   quietEndHour: 7,
   workDaysOnly: false,
   enabled: true,
 };
-let locked = false;
+
+let timer = new ActivityTimer();
+let settings = { ...DEFAULT_SETTINGS };
+let lock = null; // { task, captureUrl } while locked, else null
 let sse = null;
 
-// --- persistence ----------------------------------------------------------
+// ── persistence ────────────────────────────────────────────────────────────
 
 async function load() {
-  const got = await chrome.storage.local.get(['activeMs', 'lastTick', 'settings', 'locked']);
-  settings = { ...settings, ...(got.settings ?? {}) };
+  const got = await chrome.storage.local.get(['activeMs', 'lastTick', 'settings', 'lock']);
+  settings = { ...DEFAULT_SETTINGS, ...(got.settings ?? {}) };
   timer = new ActivityTimer({ config: { workMs: settings.workMs } });
   timer.activeMs = got.activeMs ?? 0;
   timer.lastTick = got.lastTick ?? null;
-  locked = got.locked ?? false;
+  lock = got.lock ?? null;
 }
 
-async function save() {
-  await chrome.storage.local.set({ activeMs: timer.activeMs, lastTick: timer.lastTick, locked });
-}
+const save = () =>
+  chrome.storage.local.set({ activeMs: timer.activeMs, lastTick: timer.lastTick, lock });
 
-// --- server ---------------------------------------------------------------
+const saveSettings = () => chrome.storage.local.set({ settings });
 
+// ── server ─────────────────────────────────────────────────────────────────
+
+/** Returns parsed JSON, or null if the server is down or unhappy. */
 async function serverFetch(path, opts) {
   try {
     const res = await fetch(`${SERVER}${path}`, opts);
-    if (!res.ok) return null;
-    return await res.json();
+    return res.ok ? await res.json() : null;
   } catch {
-    return null; // server down; handled by the caller
+    return null; // server down; every caller treats null as "cannot verify"
   }
 }
 
+const parseData = (e) => {
+  try {
+    return JSON.parse(e.data);
+  } catch {
+    return {};
+  }
+};
+
 /**
- * Listen for the server's unlock event.
+ * Listen for the server's events.
  *
- * The extension never unlocks because the phone said so — only because the
- * server, which owns the session and called Gemma, said so.
+ * The extension never unlocks because a page or the phone asked it to — only
+ * because the server, which owns the session and called Gemma, said so.
  */
 function connectEvents() {
-  try {
-    sse?.close();
-  } catch {}
+  closeEvents();
 
   try {
     sse = new EventSource(`${SERVER}/events`);
@@ -68,190 +82,160 @@ function connectEvents() {
     return;
   }
 
-  sse.addEventListener('verified', async (e) => {
-    let durationMs = null;
-    try {
-      durationMs = JSON.parse(e.data).durationMs;
-    } catch {}
-    await unlockAll(durationMs);
-  });
-
-  sse.addEventListener('failed', (e) => {
-    let reason = '';
-    try {
-      reason = JSON.parse(e.data).reason ?? '';
-    } catch {}
-    broadcastToTabs({ type: 'bt-failed', reason });
-  });
-
-  sse.addEventListener('stage', (e) => {
-    try {
-      broadcastToTabs({ type: 'bt-stage', stage: JSON.parse(e.data).stage });
-    } catch {}
-  });
-
-  sse.onerror = () => {
-    try {
-      sse.close();
-    } catch {}
-    sse = null;
-  };
-}
-
-// --- locking --------------------------------------------------------------
-
-async function broadcastToTabs(message) {
-  const tabs = await chrome.tabs.query({});
-  await Promise.allSettled(
-    tabs.map((t) => (t.id ? chrome.tabs.sendMessage(t.id, message).catch(() => {}) : null))
+  sse.addEventListener('verified', (e) => unlockAll(parseData(e).durationMs));
+  sse.addEventListener('failed', (e) =>
+    broadcastToTabs({ type: 'bt-failed', reason: parseData(e).reason ?? '' })
   );
+  sse.addEventListener('stage', (e) =>
+    broadcastToTabs({ type: 'bt-stage', stage: parseData(e).stage })
+  );
+  sse.onerror = closeEvents;
 }
 
-async function lockAll() {
-  const due = await serverFetch('/due', { method: 'POST' });
-
-  if (!due) {
-    // The server is the only thing that can verify a break. Without it we
-    // say so rather than locking the browser with no way out.
-    chrome.notifications?.create({
-      type: 'basic',
-      iconUrl: 'icon128.png',
-      title: 'BreakTension needs its server',
-      message: 'Run `npm run server` to start the local verifier. Not locking until then.',
-    });
-    return;
-  }
-
-  locked = true;
-  await save();
-  connectEvents();
-
-  await broadcastToTabs({
-    type: 'bt-lock',
-    task: due.task?.text ?? '',
-    captureUrl: due.captureUrl,
-  });
-  chrome.action.setBadgeText({ text: '!' });
-  chrome.action.setBadgeBackgroundColor({ color: '#f0b254' });
-}
-
-async function unlockAll(durationMs) {
-  locked = false;
-  timer.creditBreak(Date.now());
-  await save();
-  await serverFetch('/reset', { method: 'POST' });
-  await broadcastToTabs({ type: 'bt-unlock', durationMs });
-  chrome.action.setBadgeText({ text: '' });
+function closeEvents() {
   try {
     sse?.close();
   } catch {}
   sse = null;
 }
 
-// --- the tick -------------------------------------------------------------
+// ── locking ────────────────────────────────────────────────────────────────
+
+async function broadcastToTabs(message) {
+  const tabs = await chrome.tabs.query({});
+  await Promise.allSettled(
+    tabs.filter((t) => t.id).map((t) => chrome.tabs.sendMessage(t.id, message).catch(() => {}))
+  );
+}
+
+function setBadge(locked) {
+  chrome.action.setBadgeText({ text: locked ? '!' : '' });
+  if (locked) chrome.action.setBadgeBackgroundColor({ color: '#f0b254' });
+}
+
+async function lockAll() {
+  const due = await serverFetch('/due', { method: 'POST' });
+
+  if (!due) {
+    // The server is the only thing that can verify a break, so without it we
+    // say so rather than locking the browser with no way back out.
+    chrome.notifications?.create({
+      type: 'basic',
+      iconUrl: 'icon128.png',
+      title: 'BreakTension needs its server',
+      message: 'Run `npm run server` to start the local verifier. Not locking until then.',
+    });
+    return false;
+  }
+
+  lock = { task: due.task?.text ?? '', captureUrl: due.captureUrl };
+  await save();
+  connectEvents();
+
+  await broadcastToTabs({ type: 'bt-lock', ...lock });
+  setBadge(true);
+  return true;
+}
+
+async function unlockAll(durationMs) {
+  lock = null;
+  timer.creditBreak(Date.now());
+  await save();
+  await serverFetch('/reset', { method: 'POST' });
+  await broadcastToTabs({ type: 'bt-unlock', durationMs });
+  setBadge(false);
+  closeEvents();
+}
+
+// ── the tick ───────────────────────────────────────────────────────────────
 
 async function tick() {
   await load();
-  if (!settings.enabled || locked) return;
+  if (!settings.enabled || lock) return;
 
-  const state = await chrome.idle.queryState(60);
+  const idleState = await chrome.idle.queryState(60);
   const now = Date.now();
 
-  if (state === 'active') {
+  if (idleState === 'active') {
     timer.tick(now);
   } else {
     // Idle or locked screen: record the timestamp so the next active tick
     // measures a real gap, but accrue nothing.
     timer.lastTick = now;
   }
-
   await save();
 
-  const mins = Math.ceil(timer.remainingMs() / 60000);
-  chrome.action.setTitle({ title: `BreakTension — ${mins} min of desk time left` });
+  chrome.action.setTitle({
+    title: `BreakTension — ${Math.ceil(timer.remainingMs() / 60000)} min of desk time left`,
+  });
 
   if (!timer.isDue()) return;
 
-  const gate = breakAllowed({
-    date: new Date(),
-    quietStartHour: settings.quietStartHour,
-    quietEndHour: settings.quietEndHour,
-    workDaysOnly: settings.workDaysOnly,
-  });
-  if (!gate.allowed) return;
-
-  await lockAll();
+  const gate = breakAllowed({ date: new Date(), ...settings });
+  if (gate.allowed) await lockAll();
 }
 
-// --- wiring ---------------------------------------------------------------
+// ── messages ───────────────────────────────────────────────────────────────
 
-chrome.runtime.onInstalled.addListener(async () => {
-  await load();
-  chrome.alarms.create(ALARM, { periodInMinutes: TICK_MINUTES });
+const HANDLERS = {
+  'bt-status': async () => ({
+    ...timer.toJSON(),
+    locked: Boolean(lock),
+    enabled: settings.enabled,
+    serverUp: Boolean(await serverFetch('/state')),
+    settings,
+  }),
+
+  // What a tab needs to render the overlay, including the token-bearing URL.
+  'bt-lock-state': async () => ({ locked: Boolean(lock), ...(lock ?? {}) }),
+
+  'bt-force-break': async () => ({ ok: await lockAll() }),
+
+  'bt-set-enabled': async (msg) => {
+    settings.enabled = Boolean(msg.value);
+    await saveSettings();
+    return { ok: true, enabled: settings.enabled };
+  },
+
+  'bt-save-settings': async (msg) => {
+    settings = { ...settings, ...msg.settings };
+    await saveSettings();
+    return { ok: true, settings };
+  },
+};
+
+chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+  const handler = HANDLERS[msg?.type];
+  if (!handler) return false; // not ours; let other listeners answer
+
+  (async () => {
+    await load();
+    reply(await handler(msg));
+  })();
+  return true; // reply is async
 });
 
-chrome.runtime.onStartup.addListener(async () => {
-  await load();
-  chrome.alarms.create(ALARM, { periodInMinutes: TICK_MINUTES });
-});
+// ── wiring ─────────────────────────────────────────────────────────────────
+
+const startAlarm = () => chrome.alarms.create(ALARM, { periodInMinutes: TICK_MINUTES });
+
+chrome.runtime.onInstalled.addListener(() => load().then(startAlarm));
+chrome.runtime.onStartup.addListener(() => load().then(startAlarm));
 
 chrome.alarms.onAlarm.addListener((a) => {
   if (a.name === ALARM) tick();
 });
 
-// A newly opened or navigated tab must be covered too, or the lock is
-// trivially escapable by opening a new tab.
+// A newly opened or navigated tab must be covered too, or opening a new tab
+// is a trivial way out of the lock.
 chrome.tabs.onUpdated.addListener(async (tabId, info) => {
-  if (info.status !== 'complete' || !locked) return;
-  const due = await serverFetch('/state');
-  if (!due || due.state === 'idle') return;
-  chrome.tabs
-    .sendMessage(tabId, { type: 'bt-lock', task: due.task?.text ?? '', captureUrl: `https://${due.lan}:${due.port}/capture` })
-    .catch(() => {});
-});
-
-chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
-  (async () => {
-    await load();
-
-    if (msg.type === 'bt-status') {
-      const srv = await serverFetch('/state');
-      reply({
-        ...timer.toJSON(),
-        locked,
-        enabled: settings.enabled,
-        serverUp: Boolean(srv),
-        settings,
-      });
-      return;
-    }
-
-    if (msg.type === 'bt-force-break') {
-      await lockAll();
-      reply({ ok: true });
-      return;
-    }
-
-    if (msg.type === 'bt-set-enabled') {
-      settings.enabled = Boolean(msg.value);
-      await chrome.storage.local.set({ settings });
-      reply({ ok: true, enabled: settings.enabled });
-      return;
-    }
-
-    if (msg.type === 'bt-save-settings') {
-      settings = { ...settings, ...msg.settings };
-      await chrome.storage.local.set({ settings });
-      reply({ ok: true, settings });
-      return;
-    }
-
-    reply({ ok: false });
-  })();
-  return true; // async reply
+  if (info.status !== 'complete') return;
+  await load();
+  if (!lock) return;
+  chrome.tabs.sendMessage(tabId, { type: 'bt-lock', ...lock }).catch(() => {});
 });
 
 load().then(() => {
-  chrome.alarms.create(ALARM, { periodInMinutes: TICK_MINUTES });
-  if (locked) connectEvents();
+  startAlarm();
+  if (lock) connectEvents();
 });
