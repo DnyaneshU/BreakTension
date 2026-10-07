@@ -12,6 +12,7 @@ import { ensureCert } from './certs.js';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(HERE, 'public');
 const PORT = Number(process.env.BT_PORT ?? 8787);
+const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -27,6 +28,13 @@ const session = new Session();
 
 /** Everyone listening for state changes: the extension, and any open phone page. */
 const listeners = new Set();
+
+// Set during boot, and used to build the capture URL. Not a constant: without
+// a certificate the server falls back to HTTP, and a QR pointing at https on
+// an http server fails with nothing useful shown to the user.
+let origin = '';
+
+// ── helpers ────────────────────────────────────────────────────────────────
 
 function broadcast(event, data) {
   const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -53,7 +61,16 @@ function json(res, status, body) {
   res.end(payload);
 }
 
-async function readBody(req, limitBytes = 12 * 1024 * 1024) {
+function html(res, status, body) {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(
+    '<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">' +
+      '<body style="font:16px system-ui;padding:2rem;background:#0b0f0c;color:#e8f0ea">' +
+      body
+  );
+}
+
+async function readBody(req, limitBytes = MAX_UPLOAD_BYTES) {
   const chunks = [];
   let total = 0;
   for await (const chunk of req) {
@@ -65,7 +82,8 @@ async function readBody(req, limitBytes = 12 * 1024 * 1024) {
 }
 
 async function serveStatic(res, urlPath) {
-  // normalize + strip leading separators so "../" cannot escape PUBLIC
+  // normalize, then strip leading separators and ".." so the path cannot
+  // escape PUBLIC.
   const rel = normalize(urlPath).replace(/^([/\\]|\.\.([/\\]|$))+/, '');
   const file = join(PUBLIC, rel || 'capture.html');
   if (!file.startsWith(PUBLIC)) return json(res, 403, { error: 'forbidden' });
@@ -83,42 +101,40 @@ async function serveStatic(res, urlPath) {
   }
 }
 
-const handler = async (req, res) => {
-  const url = new URL(req.url, `https://${req.headers.host ?? 'localhost'}`);
-  const path = url.pathname;
+// ── routes ─────────────────────────────────────────────────────────────────
+// Keyed by "METHOD /path". A table rather than an if-chain so a route cannot
+// be shadowed by an earlier partial match, and the whole API is readable.
 
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    });
-    return res.end();
-  }
+const ROUTES = {
+  'GET /': (_req, res) =>
+    json(res, 200, {
+      name: 'BreakTension',
+      state: session.state,
+      origin,
+      hint: 'Lock your browser until you go outside. Verified locally by Gemma.',
+    }),
 
-  // --- extension-facing -------------------------------------------------
-
-  if (path === '/state') {
-    return json(res, 200, { ...session.toJSON(), lan: LAN, port: PORT });
-  }
+  // A liveness ping for the extension. Deliberately does not return the
+  // token: only the QR carries that.
+  'GET /state': (_req, res) => json(res, 200, { ...session.toJSON(), origin }),
 
   // The break timer fired. Mint a token and tell everyone to lock.
-  if (path === '/due' && req.method === 'POST') {
+  'POST /due': (_req, res) => {
     const { token, task } = session.markDue();
-    const captureUrl = `https://${LAN}:${PORT}/capture?t=${token}`;
+    const captureUrl = `${origin}/capture?t=${token}`;
     broadcast('due', { task: { id: task.id, text: task.text }, captureUrl });
-    return json(res, 200, { token, task, captureUrl });
-  }
+    json(res, 200, { token, task, captureUrl });
+  },
 
   // Back to work; start the next cycle.
-  if (path === '/reset' && req.method === 'POST') {
+  'POST /reset': (_req, res) => {
     session.reset();
     broadcast('reset', {});
-    return json(res, 200, session.toJSON());
-  }
+    json(res, 200, session.toJSON());
+  },
 
-  // Server-sent events: the only channel that can unlock the browser.
-  if (path === '/events') {
+  // The only channel that can unlock the browser.
+  'GET /events': (req, res) => {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -140,39 +156,31 @@ const handler = async (req, res) => {
       clearInterval(keepAlive);
       listeners.delete(res);
     });
-    return;
-  }
+  },
 
-  // --- phone-facing -----------------------------------------------------
-
-  if (path === '/capture') {
+  // The phone page. Claiming here means a reload mid-break is harmless.
+  'GET /capture': (_req, res, url) => {
     const token = url.searchParams.get('t');
     if (!session.isTokenValid(token)) {
-      res.writeHead(410, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end(
-        '<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">' +
-          '<body style="font:16px system-ui;padding:2rem;background:#0b0f0c;color:#e8f0ea">' +
-          '<h1 style="font-size:1.2rem">Link expired</h1>' +
-          '<p style="opacity:.7">Scan the QR code on your laptop again.</p>'
-      );
+      return html(res, 410, '<h1 style="font-size:1.2rem">Link expired</h1><p style="opacity:.7">Scan the QR code on your laptop again.</p>');
     }
     session.claim(token);
     return serveStatic(res, 'capture.html');
-  }
+  },
 
   // What am I supposed to do? Asked by the phone page on load.
-  if (path === '/task') {
+  'GET /task': (_req, res, url) => {
     const token = url.searchParams.get('t');
     if (!session.isTokenValid(token)) return json(res, 410, { error: 'expired' });
-    return json(res, 200, {
+    json(res, 200, {
       task: session.task ? { id: session.task.id, text: session.task.text } : null,
       attempts: session.attempts,
       state: session.state,
     });
-  }
+  },
 
-  // The photo. This is the only path that can lead to an unlock.
-  if (path === '/verify' && req.method === 'POST') {
+  // The photo. The only path that can lead to an unlock.
+  'POST /verify': async (req, res) => {
     let body;
     try {
       body = JSON.parse(await readBody(req));
@@ -180,7 +188,7 @@ const handler = async (req, res) => {
       return json(res, 400, { ok: false, reason: `Could not read the photo (${err.message}).` });
     }
 
-    const token = body?.token;
+    const { token } = body ?? {};
     if (!session.isTokenValid(token)) {
       return json(res, 410, { ok: false, reason: 'This link expired. Scan the QR code again.' });
     }
@@ -204,37 +212,48 @@ const handler = async (req, res) => {
 
     const durationMs = session.pass();
     broadcast('verified', { durationMs, task: session.task?.text });
-    return json(res, 200, { ok: true, ...verdict, durationMs });
-  }
-
-  if (path === '/' || path === '') {
-    return json(res, 200, {
-      name: 'BreakTension',
-      state: session.state,
-      lan: LAN,
-      hint: 'Lock your browser until you go outside. Verified locally by Gemma.',
-    });
-  }
-
-  return serveStatic(res, path.slice(1));
+    json(res, 200, { ok: true, ...verdict, durationMs });
+  },
 };
 
-// --- boot -----------------------------------------------------------------
+const handler = async (req, res) => {
+  // The scheme here only matters for parsing; `origin` is what we hand out.
+  const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    });
+    return res.end();
+  }
+
+  const route = ROUTES[`${req.method} ${url.pathname}`];
+  if (route) return route(req, res, url);
+
+  // Anything else is a static asset request from the phone page.
+  if (req.method === 'GET') return serveStatic(res, url.pathname.slice(1));
+
+  return json(res, 405, { error: 'method not allowed' });
+};
+
+// ── boot ───────────────────────────────────────────────────────────────────
 
 const LAN = bestLanAddress() ?? '127.0.0.1';
 
 const cert = ensureCert({ dir: join(process.cwd(), 'certs'), host: LAN });
-let server;
-let scheme;
+const scheme = cert ? 'https' : 'http';
+origin = `${scheme}://${LAN}:${PORT}`;
 
-if (cert) {
-  server = createHttpsServer({ key: cert.key, cert: cert.cert }, handler);
-  scheme = 'https';
-} else {
-  // Without a cert the phone cannot open its camera, but localhost still can,
-  // so run anyway and say plainly what is lost.
-  server = createHttpServer(handler);
-  scheme = 'http';
+const server = cert
+  ? createHttpsServer({ key: cert.key, cert: cert.cert }, handler)
+  : createHttpServer(handler);
+
+if (!cert) {
+  // getUserMedia needs a secure context, so without a certificate the phone
+  // cannot open its camera at all. Say so rather than letting it fail later
+  // as an unexplained black rectangle.
   console.warn('\n!  No certificate could be generated (is openssl installed?).');
   console.warn('!  Running over HTTP: the phone camera will NOT work, only localhost.\n');
 }
@@ -252,8 +271,8 @@ server.on('error', (err) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n  BreakTension server`);
   console.log(`  ├─ laptop : ${scheme}://localhost:${PORT}`);
-  console.log(`  └─ phone  : ${scheme}://${LAN}:${PORT}`);
+  console.log(`  └─ phone  : ${origin}`);
   console.log(`\n  Model: ${process.env.BT_MODEL ?? 'gemma4:e4b'} via Ollama. Nothing leaves this machine.\n`);
 });
 
-export { handler, session };
+export { handler, session, ROUTES };
