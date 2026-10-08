@@ -1,0 +1,40 @@
+{
+  "name": "breaktension",
+  "displayName": "BreakTension",
+  "description": "Your editor nags until you go outside. Verified locally by Gemma — no account, no upload, no internet.",
+  "version": "0.1.0",
+  "publisher": "dnyanesh",
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Other"],
+  "keywords": ["break", "health", "pomodoro", "ollama", "gemma"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "breaktension.status", "title": "BreakTension: Show status" },
+      { "command": "breaktension.breakNow", "title": "BreakTension: Take a break now" },
+      { "command": "breaktension.pause", "title": "BreakTension: Pause or resume" }
+    ],
+    "configuration": {
+      "title": "BreakTension",
+      "properties": {
+        "breaktension.serverUrl": {
+          "type": "string",
+          "default": "https://localhost:8787",
+          "description": "The local BreakTension verifier. Nothing is sent anywhere else."
+        },
+        "breaktension.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Count editor time toward the shared break budget."
+        },
+        "breaktension.remindEveryMinutes": {
+          "type": "number",
+          "default": 3,
+          "description": "While a break is due, how often to show the reminder again."
+        }
+      }
+    }
+  }
+}

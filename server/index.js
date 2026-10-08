@@ -5,6 +5,7 @@ import { join, dirname, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { Session } from './session.js';
+import { Clients } from './clients.js';
 import { judgeStaged } from './gemma.js';
 import { bestLanAddress } from './net.js';
 import { ensureCert } from './certs.js';
@@ -25,6 +26,16 @@ const MIME = {
 
 // One session per laptop. Single user by design — nothing leaves this machine.
 const session = new Session();
+
+/**
+ * The shared desk-time budget.
+ *
+ * It lives here rather than in a client because the browser and the editor
+ * share one 35-minute stretch: switching apps is not a break. Each client
+ * POSTs /tick while the user is active and the server decides when a break
+ * is due.
+ */
+const clients = new Clients({ workMs: Number(process.env.BT_WORK_MS ?? 35 * 60 * 1000) });
 
 /** Everyone listening for state changes: the extension, and any open phone page. */
 const listeners = new Set();
@@ -116,7 +127,45 @@ const ROUTES = {
 
   // A liveness ping for the extension. Deliberately does not return the
   // token: only the QR carries that.
-  'GET /state': (_req, res) => json(res, 200, { ...session.toJSON(), origin }),
+  'GET /state': (_req, res) =>
+    json(res, 200, {
+      ...session.toJSON(),
+      origin,
+      remainingMs: clients.remainingMs(),
+      clients: clients.activeClients(),
+    }),
+
+  /**
+   * A client reports that the user is active.
+   *
+   * The response tells it what to do, so a client needs no timer logic of its
+   * own: it reports, and reacts to `due`.
+   */
+  'POST /tick': async (req, res) => {
+    let body = {};
+    try {
+      body = JSON.parse(await readBody(req, 4096));
+    } catch {
+      // A tick with no body is still a valid "I am here".
+    }
+
+    clients.report(body.client ?? 'unknown');
+
+    // The client that noticed may not be the one that should lock, so the
+    // decision is made once, here, and broadcast to all of them.
+    if (clients.isDue() && session.state === 'idle' && !body.deferred) {
+      const { token, task } = session.markDue();
+      const captureUrl = `${origin}/capture?t=${token}`;
+      broadcast('due', { task: { id: task.id, text: task.text }, captureUrl });
+      return json(res, 200, { due: true, task, captureUrl, remainingMs: 0 });
+    }
+
+    json(res, 200, {
+      due: session.state !== 'idle',
+      remainingMs: clients.remainingMs(),
+      clients: clients.activeClients(),
+    });
+  },
 
   // The break timer fired. Mint a token and tell everyone to lock.
   'POST /due': (_req, res) => {
@@ -131,6 +180,27 @@ const ROUTES = {
     session.reset();
     broadcast('reset', {});
     json(res, 200, session.toJSON());
+  },
+
+  // A verified break clears the shared budget for every client at once.
+  'POST /credit': (_req, res) => {
+    clients.creditBreak();
+    json(res, 200, { remainingMs: clients.remainingMs() });
+  },
+
+  // Snooze or skip: stand the budget down without crediting a break.
+  'POST /defer': async (req, res) => {
+    let body = {};
+    try {
+      body = JSON.parse(await readBody(req, 4096));
+    } catch {}
+
+    if (body.ms) clients.snooze(Number(body.ms));
+    else clients.creditBreak(); // a skip ends the cycle
+
+    session.reset();
+    broadcast('dismiss', { reason: body.reason ?? 'deferred' });
+    json(res, 200, { remainingMs: clients.remainingMs() });
   },
 
   // The only channel that can unlock the browser.
