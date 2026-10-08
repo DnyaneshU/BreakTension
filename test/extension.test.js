@@ -235,3 +235,71 @@ test('the popup explains what a pending break is waiting on', () => {
   assert.match(read('background.js'), /deferredBy/);
   assert.match(read('popup.js'), /deferredBy/);
 });
+
+// --- skip confirmation ----------------------------------------------------
+
+test('the lock screen skip goes through the confirmation ladder, not one click', () => {
+  const src = read('content.js');
+  // The whole claim is that a break is not dismissible in a quarter second.
+  assert.match(src, /runSkipConfirm/, 'the skip button must open the ladder');
+  assert.doesNotMatch(
+    src,
+    /skipBtn\.onclick = \(\) => act\('bt-skip'/,
+    'a direct one-click skip defeats the product'
+  );
+});
+
+test('both confirmation prompts must be cleared before the skip is sent', () => {
+  const src = read('content.js');
+  const fn = src.match(/async function runSkipConfirm[\s\S]*?\n\}/)[0];
+  assert.match(fn, /step \+= 1/);
+  assert.match(fn, /step < SKIP_PROMPTS\.length/, 'must not send on the first confirm');
+  assert.match(fn, /sendMessage\(\{ type: 'bt-skip' \}\)/);
+});
+
+test('backing out is offered at every step', () => {
+  const fn = read('content.js').match(/async function runSkipConfirm[\s\S]*?\n\}/)[0];
+  assert.match(fn, /c-stay/);
+  assert.match(fn, /onclick = close/);
+});
+
+test('prompt text is escaped before going into innerHTML', () => {
+  const fn = read('content.js').match(/async function runSkipConfirm[\s\S]*?\n\}/)[0];
+  for (const field of ['p.question', 'p.cancel', 'p.confirm']) {
+    assert.ok(fn.includes(`escapeHtml(${field})`), `${field} must be escaped`);
+  }
+});
+
+test('modules the content script imports at runtime are web accessible', () => {
+  const src = read('content.js');
+  const resources = (manifest.web_accessible_resources ?? []).flatMap((w) => w.resources);
+  for (const m of src.matchAll(/getURL\('([^']+)'\)/g)) {
+    assert.ok(resources.includes(m[1]), `${m[1]} is imported by URL but not web accessible`);
+  }
+});
+
+// --- scoring --------------------------------------------------------------
+
+test('only a verified break scores; a skip is penalised', () => {
+  const src = read('background.js');
+  const unlock = src.match(/async function unlockAll\([\s\S]*?\n\}/)[0];
+  assert.match(unlock, /scoreBreak/, 'a verified photo earns points');
+
+  const skip = src.match(/'bt-skip': async \(\)[\s\S]*?\n  \},/)[0];
+  assert.match(skip, /penaliseSkip/, 'a skip must cost something');
+  assert.doesNotMatch(skip, /scoreBreak/);
+});
+
+test('score state is persisted so the streak survives a restart', () => {
+  const src = read('background.js');
+  assert.match(src, /chrome\.storage\.local\.get\(\[[^\]]*'score'/);
+  assert.match(src, /chrome\.storage\.local\.set\(\{[^}]*score/);
+});
+
+test('the second prompt names a consequence the code actually implements', () => {
+  // It claims the streak resets; penaliseSkip must really do that.
+  const hatches = readFileSync(join(EXT, 'hatches.js'), 'utf8');
+  assert.match(hatches, /streak resets/i);
+  const score = readFileSync(join(EXT, 'score.js'), 'utf8');
+  assert.match(score, /streak: 0/, 'penaliseSkip must zero the streak');
+});

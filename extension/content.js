@@ -12,6 +12,7 @@ const HOST_ID = 'breaktension-lock-host';
 let host = null;
 let root = null;
 let qrLoaded = null;
+let hatchMod = null;
 
 const STAGE_LABELS = {
   outdoor: 'Checking you are outdoors…',
@@ -97,6 +98,18 @@ async function showLock({ task, captureUrl }) {
       .hatches button:hover:not([disabled]) { color:#e9f1ea; border-color:#3a5244; }
       .hatches button[disabled] { opacity:.35; cursor:default; }
       .hatch-note { margin-top:11px; color:#6d8478; font-size:12px; min-height:16px; }
+      .score { margin-top:18px; color:#6d8478; font-size:12px; }
+      .score b { color:#9bb0a3; font-weight:600; }
+      .confirm {
+        margin-top:16px; border:1px solid #4a3426; background:#1b1410;
+        border-radius:12px; padding:16px; text-align:left;
+      }
+      .confirm p { color:#f0cDb0; font-size:14px; margin-bottom:13px; }
+      .confirm .btns { display:flex; gap:9px; flex-wrap:wrap; }
+      .confirm button { font:inherit; font-size:13px; border-radius:9px; padding:9px 14px; cursor:pointer; border:1px solid transparent; }
+      .confirm .go { background:#5a2b22; color:#ffd9d2; border-color:#7a3c30; }
+      .confirm .stay { background:#1d2a21; color:#cfe6d7; border-color:#2f4537; font-weight:600; }
+      .step { color:#6d8478; font-size:11px; letter-spacing:.1em; text-transform:uppercase; margin-bottom:7px; }
       .why { margin-top:26px; padding-top:18px; border-top:1px solid #1c2a21; color:#6d8478; font-size:13px; }
       .ok { font-size:30px; font-weight:650; color:#6fe39a; }
       @media (prefers-reduced-motion:no-preference) {
@@ -128,6 +141,8 @@ async function showLock({ task, captureUrl }) {
           <button id="bt-meeting">I'm in a meeting</button>
         </div>
         <div class="hatch-note" id="hatch-note"></div>
+        <div class="score" id="score"></div>
+        <div id="confirm-slot"></div>
 
         <p class="why">
           The photo is judged by Gemma on your own laptop. Nothing is uploaded,
@@ -174,6 +189,8 @@ async function wireHatches(r) {
     }
   }
 
+  if (status?.score) renderScore(r, status.score);
+
   const act = async (type, pending) => {
     for (const b of [snoozeBtn, skipBtn, meetingBtn]) b.disabled = true;
     if (note) note.textContent = pending;
@@ -192,7 +209,7 @@ async function wireHatches(r) {
   };
 
   snoozeBtn.onclick = () => act('bt-snooze', 'Snoozing…');
-  skipBtn.onclick = () => act('bt-skip', 'Skipping…');
+  skipBtn.onclick = () => runSkipConfirm(r, status);
   meetingBtn.onclick = async () => {
     for (const b of [snoozeBtn, skipBtn, meetingBtn]) b.disabled = true;
     if (note) note.textContent = 'Holding breaks for an hour…';
@@ -252,3 +269,76 @@ chrome.runtime
     }
   })
   .catch(() => {});
+
+
+function renderScore(r, score) {
+  const el = r.getElementById('score');
+  if (!el) return;
+  const streak = score.streak > 0 ? ` · <b>${score.streak}</b> break streak` : '';
+  const next = score.toNext !== null ? ` · ${score.toNext} to ${score.nextLevel.name}` : '';
+  el.innerHTML = `<b>${score.points}</b> points · <b>${score.level.name}</b>${streak}${next}`;
+}
+
+/**
+ * The skip ladder.
+ *
+ * Skipping is allowed — someone on a deadline in the rain needs a way out —
+ * but it asks twice, and the second prompt names what it costs. The whole
+ * claim of this product is that the break is not dismissible in a quarter of
+ * a second, and a one-click skip button quietly takes that away.
+ *
+ * Backing out is styled as the prominent choice at every step.
+ */
+async function runSkipConfirm(r, status) {
+  hatchMod ??= import(chrome.runtime.getURL('hatches.js'));
+  let SKIP_PROMPTS;
+  try {
+    ({ SKIP_PROMPTS } = await hatchMod);
+  } catch {
+    return; // cannot load the prompts; leave the skip unavailable rather than silent
+  }
+
+  const slot = r.getElementById('confirm-slot');
+  const hatches = r.querySelector('.hatches');
+  if (!slot) return;
+
+  let step = 0;
+
+  const close = () => {
+    slot.innerHTML = '';
+    if (hatches) hatches.style.display = 'flex';
+  };
+
+  const draw = () => {
+    const p = SKIP_PROMPTS[step];
+    if (hatches) hatches.style.display = 'none';
+
+    slot.innerHTML = `
+      <div class="confirm">
+        <div class="step">Confirm ${step + 1} of ${SKIP_PROMPTS.length}</div>
+        <p>${escapeHtml(p.question)}</p>
+        <div class="btns">
+          <button class="stay" id="c-stay">${escapeHtml(p.cancel)}</button>
+          <button class="go" id="c-go">${escapeHtml(p.confirm)}</button>
+        </div>
+      </div>`;
+
+    r.getElementById('c-stay').onclick = close;
+    r.getElementById('c-go').onclick = async () => {
+      step += 1;
+      if (step < SKIP_PROMPTS.length) return draw();
+
+      // Both confirmations given.
+      slot.innerHTML = '<div class="confirm"><p>Skipping…</p></div>';
+      const res = await chrome.runtime.sendMessage({ type: 'bt-skip' }).catch(() => null);
+      if (!res?.ok) {
+        slot.innerHTML = `<div class="confirm"><p>${escapeHtml(res?.reason ?? 'That did not work.')}</p>
+          <div class="btns"><button class="stay" id="c-stay">OK</button></div></div>`;
+        r.getElementById('c-stay').onclick = close;
+      }
+      // On success the worker broadcasts bt-dismiss and the overlay goes away.
+    };
+  };
+
+  draw();
+}

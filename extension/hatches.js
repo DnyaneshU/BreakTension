@@ -111,3 +111,34 @@ export function deferReason({ state = {}, date, settings = {} }) {
 
   return null;
 }
+
+// ── skip confirmation ──────────────────────────────────────────────────────
+
+/**
+ * Skipping asks twice.
+ *
+ * The product's entire claim is that the break cannot be dismissed in a
+ * quarter of a second. A one-click skip button quietly takes that away, so
+ * the skip escalates: the first prompt asks, the second names the cost.
+ *
+ * This is friction on purpose. Someone who genuinely has to keep working
+ * will click through both in five seconds. Someone reaching for it out of
+ * habit gets two chances to notice they are doing that.
+ */
+export const SKIP_PROMPTS = [
+  {
+    question: 'Skip this break? You have been at the screen a while.',
+    confirm: 'Yes, skip it',
+    cancel: 'No, I will go outside',
+    destructive: true,
+  },
+  {
+    question: 'Are you really sure? This spends one of your 2 skips today, and your streak resets.',
+    confirm: 'I am sure, skip it',
+    cancel: 'Actually, no',
+    destructive: true,
+  },
+];
+
+export const nextConfirmStep = (step) => step + 1;
+export const confirmComplete = (step) => step >= SKIP_PROMPTS.length;

@@ -45,7 +45,9 @@
     {
       "resources": [
         "qr.js",
-        "vendor-qrcode.mjs"
+        "vendor-qrcode.mjs",
+        "hatches.js",
+        "score.js"
       ],
       "matches": [
         "<all_urls>"

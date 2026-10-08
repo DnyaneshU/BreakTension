@@ -12,6 +12,7 @@ import {
   meetingActive,
   resetCycle,
 } from './hatches.js';
+import { creditBreak as scoreBreak, penaliseSkip, summarise } from './score.js';
 
 /**
  * The service worker.
@@ -43,22 +44,24 @@ let timer = new ActivityTimer();
 let settings = { ...DEFAULT_SETTINGS };
 let lock = null; // { task, captureUrl } while locked, else null
 let hatches = {}; // snooze / skip / meeting state, see hatches.js
+let score = {}; // points / streak, see score.js
 let sse = null;
 
 // ── persistence ────────────────────────────────────────────────────────────
 
 async function load() {
-  const got = await chrome.storage.local.get(['activeMs', 'lastTick', 'settings', 'lock', 'hatches']);
+  const got = await chrome.storage.local.get(['activeMs', 'lastTick', 'settings', 'lock', 'hatches', 'score']);
   settings = { ...DEFAULT_SETTINGS, ...(got.settings ?? {}) };
   timer = new ActivityTimer({ config: { workMs: settings.workMs } });
   timer.activeMs = got.activeMs ?? 0;
   timer.lastTick = got.lastTick ?? null;
   lock = got.lock ?? null;
   hatches = got.hatches ?? {};
+  score = got.score ?? {};
 }
 
 const save = () =>
-  chrome.storage.local.set({ activeMs: timer.activeMs, lastTick: timer.lastTick, lock, hatches });
+  chrome.storage.local.set({ activeMs: timer.activeMs, lastTick: timer.lastTick, lock, hatches, score });
 
 const saveSettings = () => chrome.storage.local.set({ settings });
 
@@ -173,6 +176,7 @@ async function dismissLock() {
 async function unlockAll(durationMs) {
   lock = null;
   hatches = resetCycle(hatches); // a real break earns a fresh snooze
+  score = scoreBreak(score, new Date()); // only a verified photo scores
   timer.creditBreak(Date.now());
   await save();
   await serverFetch('/reset', { method: 'POST' });
@@ -231,6 +235,7 @@ const HANDLERS = {
       canSnooze: canSnooze(hatches),
       inMeeting: meetingActive(hatches, now),
       meetingUntil: hatches.meetingUntil ?? null,
+      score: summarise(score),
     };
   },
 
@@ -254,6 +259,7 @@ const HANDLERS = {
     const now = new Date();
     if (skipsLeft(hatches, now) <= 0) return { ok: false, reason: 'no skips left today' };
     hatches = useSkip(hatches, now);
+    score = penaliseSkip(score, now); // costs points and the streak
     timer.creditBreak(Date.now()); // the cycle is over, honestly or not
     await save();
     await dismissLock();
