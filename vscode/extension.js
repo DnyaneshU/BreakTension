@@ -39,15 +39,20 @@ function config() {
 }
 
 /**
- * A small fetch that tolerates the self-signed certificate.
+ * A small fetch to the local server.
  *
- * The server generates its own cert so the phone can open its camera over
- * the LAN. `rejectUnauthorized: false` is scoped to this request to a
- * loopback address the user started themselves — it is not a blanket
- * relaxation of TLS.
+ * Defaults to the plain-HTTP loopback port rather than the HTTPS one. The
+ * certificate exists so the *phone* can open its camera over the LAN; it is
+ * self-signed, and making every client negotiate an exception for it is how
+ * the browser extension spent an afternoon reporting the server as down
+ * while it was answering requests.
+ *
+ * `rejectUnauthorized: false` remains for anyone who points `serverUrl` at
+ * the HTTPS port, and is scoped to this request to a loopback address the
+ * user started themselves.
  */
 function request(path, { method = 'GET', body } = {}) {
-  const base = config().get('serverUrl') ?? 'https://localhost:8787';
+  const base = config().get('serverUrl') ?? 'http://localhost:8788';
   const url = new URL(path, base);
   const mod = url.protocol === 'https:' ? https : http;
 
