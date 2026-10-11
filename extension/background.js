@@ -28,7 +28,11 @@ import { creditBreak as scoreBreak, penaliseSkip, summarise } from './score.js';
  * token.
  */
 
-const SERVER = 'https://localhost:8787';
+// Plain HTTP on loopback. localhost is a secure context by specification,
+// and an MV3 worker cannot click through a self-signed certificate warning
+// the way a tab can -- over HTTPS its fetch simply fails and the extension
+// reports the server as down while it is answering requests on the next port.
+const SERVER = 'http://localhost:8788';
 const ALARM = 'bt-tick';
 const TICK_MINUTES = 0.5;
 
@@ -132,6 +136,16 @@ function setBadge(locked) {
 }
 
 async function lockAll() {
+  // Already locked: the overlay may simply be missing, because the tabs that
+  // had it were closed, or the worker was restarted while a break was owed.
+  // Re-show it rather than silently doing nothing, which looks like a dead
+  // button to the user.
+  if (lock) {
+    await broadcastToTabs({ type: 'bt-lock', ...lock });
+    setBadge(true);
+    return true;
+  }
+
   const due = await serverFetch('/due', { method: 'POST' });
 
   if (!due) {
@@ -318,7 +332,35 @@ chrome.tabs.onUpdated.addListener(async (tabId, info) => {
   chrome.tabs.sendMessage(tabId, { type: 'bt-lock', ...lock }).catch(() => {});
 });
 
-load().then(() => {
+/**
+ * Reconcile with the server on wake.
+ *
+ * The extension's stored lock and the server's session can drift apart: the
+ * server is restarted, or a break is reset from elsewhere. The server owns
+ * the session, so it wins. Without this the extension can sit "locked" with
+ * no overlay on screen and no way to act, which is the worst possible state
+ * for a product whose whole job is locking the browser.
+ */
+async function reconcile() {
+  const state = await serverFetch('/state');
+  if (!state) return; // server down; keep what we have
+
+  if (state.state === 'idle' && lock) {
+    lock = null;
+    await save();
+    await broadcastToTabs({ type: 'bt-dismiss' });
+    setBadge(false);
+    return;
+  }
+
+  if (state.state !== 'idle' && !lock) {
+    // The server owes a break but this worker does not know about it.
+    await lockAll();
+  }
+}
+
+load().then(async () => {
   startAlarm();
+  await reconcile();
   if (lock) connectEvents();
 });

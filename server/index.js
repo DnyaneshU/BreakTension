@@ -320,6 +320,23 @@ const server = cert
   ? createHttpsServer({ key: cert.key, cert: cert.cert }, handler)
   : createHttpServer(handler);
 
+/**
+ * A plain-HTTP companion on loopback, for the browser extension.
+ *
+ * The phone needs HTTPS: getUserMedia refuses to open a camera on a
+ * non-secure origin over the LAN, which is why the self-signed certificate
+ * exists at all. But that certificate is untrusted, and an MV3 service worker
+ * cannot show a "proceed anyway" interstitial the way a tab can -- its fetch
+ * just fails, and the extension reports the server as not running while it is
+ * sitting there answering requests.
+ *
+ * `localhost` is a secure context even over plain HTTP, by specification. So
+ * the extension gets an HTTP port bound to 127.0.0.1 only. It is not
+ * reachable from the network, and the phone still gets TLS.
+ */
+const LOCAL_PORT = Number(process.env.BT_LOCAL_PORT ?? PORT + 1);
+const localServer = cert ? createHttpServer(handler) : null;
+
 if (!cert) {
   // getUserMedia needs a secure context, so without a certificate the phone
   // cannot open its camera at all. Say so rather than letting it fail later
@@ -338,10 +355,19 @@ server.on('error', (err) => {
   throw err;
 });
 
+if (localServer) {
+  localServer.on('error', (err) => {
+    // Non-fatal: the HTTPS port is the one that matters for the phone.
+    console.warn(`!  Could not open the local HTTP port ${LOCAL_PORT}: ${err.code}`);
+  });
+  localServer.listen(LOCAL_PORT, '127.0.0.1');
+}
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n  BreakTension server`);
-  console.log(`  ├─ laptop : ${scheme}://localhost:${PORT}`);
-  console.log(`  └─ phone  : ${origin}`);
+  if (localServer) console.log(`  ├─ extension : http://localhost:${LOCAL_PORT}  (loopback only)`);
+  console.log(`  ├─ laptop    : ${scheme}://localhost:${PORT}`);
+  console.log(`  └─ phone     : ${origin}`);
   console.log(`\n  Model: ${process.env.BT_MODEL ?? 'gemma4:e4b'} via Ollama. Nothing leaves this machine.\n`);
 });
 
