@@ -29,13 +29,20 @@ work is added.
    npm run server
    ```
 
-2. Install this extension:
+2. Launch the extension:
 
    ```bash
-   code --install-extension breaktension-0.1.0.vsix
+   code --extensionDevelopmentPath=/full/path/to/BreakTension/vscode
    ```
 
-   Or, for development, open the `vscode/` folder in VS Code and press F5.
+   A second VS Code window opens with BreakTension loaded. Check it worked
+   with **Ctrl+Shift+P → BreakTension** — three commands should appear.
+
+   F5 from inside the `vscode/` folder also works, but the extension host
+   starts paused waiting for the debug adapter, and on a machine with many
+   extensions installed it can time out before `activate()` ever runs
+   ("Extension host did not start in 10 seconds"). The command above skips
+   that handshake entirely, which is why it is the one documented here.
 
 The status bar shows the desk time left. It is **shared with the browser
 extension**: switching from Chrome to VS Code is not a break, so both clients
