@@ -253,10 +253,21 @@ function render({ offline, paused: isPaused, remainingMs, due, clients } = {}) {
 // ── lifecycle ──────────────────────────────────────────────────────────────
 
 function activate(context) {
-  statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  // High priority so it is not pushed off the end of a crowded status bar,
+  // which on a working install is exactly where it would end up.
+  statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 10000);
+  statusBar.name = 'BreakTension';
   statusBar.command = 'breaktension.status';
+  statusBar.text = '$(organization) BreakTension';
+  statusBar.tooltip = 'BreakTension is starting…';
   statusBar.show();
   context.subscriptions.push(statusBar);
+
+  // A one-off confirmation that activation actually happened. Without it,
+  // a silent failure to activate looks identical to a working extension
+  // whose status bar item is just hard to spot.
+  console.log('[BreakTension] activated');
+  vscode.window.setStatusBarMessage('BreakTension is running', 5000);
 
   render({ offline: true });
 

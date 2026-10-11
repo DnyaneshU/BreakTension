@@ -6,7 +6,12 @@
       "type": "extensionHost",
       "request": "launch",
       "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
-      "outFiles": ["${workspaceFolder}/*.js"]
+      "outFiles": ["${workspaceFolder}/*.js"],
+      "// note": "debugWebviews/debugWebWorkerHost off, and no preLaunchTask: the host should start immediately rather than wait on a debugger that may never attach.",
+      "autoAttachChildProcesses": false,
+      "smartStep": true,
+      "sourceMaps": false,
+      "trace": false
     }
   ]
 }
