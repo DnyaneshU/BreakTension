@@ -135,3 +135,22 @@ test('the self-signed cert exception is scoped to the local request', () => {
 test('the reminder interval is bounded so it cannot be set to zero', () => {
   assert.match(src, /Math\.max\(1,/);
 });
+
+// --- developer experience -------------------------------------------------
+
+test('F5 has something to launch', () => {
+  // Without .vscode/launch.json, pressing F5 in the extension folder does
+  // nothing at all, with no error. That is a dead end for anyone trying to
+  // run this, including its author.
+  const launchPath = join(DIR, '.vscode', 'launch.json');
+  assert.ok(existsSync(launchPath), 'vscode/.vscode/launch.json must exist');
+
+  const launch = JSON.parse(readFileSync(launchPath, 'utf8'));
+  const cfg = launch.configurations?.[0];
+
+  assert.equal(cfg.type, 'extensionHost', 'must launch an extension host');
+  assert.ok(
+    cfg.args.some((a) => a.includes('--extensionDevelopmentPath')),
+    'the host needs to be pointed at this folder'
+  );
+});
